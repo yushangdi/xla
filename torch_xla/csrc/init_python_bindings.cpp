@@ -202,8 +202,7 @@ at::Tensor QuantizePerTensor(const at::Tensor& input,
                              const std::vector<float>& scale_list,
                              const std::vector<float>& zero_point_list,
                              int quant_min, int quant_max,
-                             const std::string& dtype,
-                             int axis) {
+                             const std::string& dtype, int axis) {
   auto result = tensor_methods::quantize_per_tensor(
       bridge::GetXlaTensor(input), scale_list, zero_point_list, quant_min,
       quant_max, dtype, axis);
@@ -211,11 +210,10 @@ at::Tensor QuantizePerTensor(const at::Tensor& input,
 }
 
 at::Tensor DeQuantizePerTensor(const at::Tensor& input,
-                             const std::vector<float>& scale_list,
-                             const std::vector<float>& zero_point_list,
-                             int quant_min, int quant_max,
-                             const std::string& dtype,
-                             int axis) {
+                               const std::vector<float>& scale_list,
+                               const std::vector<float>& zero_point_list,
+                               int quant_min, int quant_max,
+                               const std::string& dtype, int axis) {
   auto result = tensor_methods::dequantize_per_tensor(
       bridge::GetXlaTensor(input), scale_list, zero_point_list, quant_min,
       quant_max, dtype, axis);
@@ -1139,7 +1137,7 @@ void InitXlaModuleBindings(py::module m) {
           }
           return result;
         });
-    m.def("_xla_dequantize_per_tensor",
+  m.def("_xla_dequantize_per_tensor",
         [](const at::Tensor& input, const std::vector<float>& scale_list,
            const std::vector<float>& zero_point_list, int quant_min,
            int quant_max, const std::string& dtype, int axis) -> at::Tensor {
@@ -1147,7 +1145,7 @@ void InitXlaModuleBindings(py::module m) {
           {
             NoGilSection nogil;
             result = DeQuantizePerTensor(input, scale_list, zero_point_list,
-                                       quant_min, quant_max, dtype, axis);
+                                         quant_min, quant_max, dtype, axis);
           }
           return result;
         });
@@ -1496,9 +1494,8 @@ void InitXlaModuleBindings(py::module m) {
   m.def("_xla_memory_info", [](const std::string& device) -> py::object {
     return GetMemoryInfo(device);
   });
-  m.def(
-      "_xla_set_use_full_mat_mul_precision",
-      [](bool use_full_mat_mul_precision) {
+  m.def("_xla_set_use_full_mat_mul_precision",
+        [](bool use_full_mat_mul_precision) {
           XlaHelpers::set_mat_mul_precision(
               use_full_mat_mul_precision ? xla::PrecisionConfig::HIGHEST
                                          : xla::PrecisionConfig::DEFAULT);
