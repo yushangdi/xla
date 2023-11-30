@@ -21,12 +21,8 @@ xla::Shape NodeOutputShape(AllReduceType reduce_type,
     ReduceScatterResult result = BuildReduceScatter(
         reduce_type, operands.subspan(0, operands.size() - 1), operands.back(),
         scale, scatter_dim, shard_count, groups, pin_layout);
-    std::vector<xla::XlaOp> outputs;
-    for (size_t i = 0; i < result.result.size(); ++i) {
-      outputs.emplace_back(result.result[i]);
-    }
-    outputs.emplace_back(result.token);
-    return xla::Tuple(operands[0].builder(), outputs);
+    result.result.emplace_back(result.token);
+    return xla::Tuple(operands[0].builder(), result.result);
   };
   std::vector<xla::Shape> input_shapes;
   for (const auto& input : inputs) {

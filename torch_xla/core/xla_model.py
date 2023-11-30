@@ -786,8 +786,6 @@ def reduce_scatter(reduce_type,
   result = torch_xla._XLAC._xla_reduce_scatter_coalesced(
       reduce_type, output or [], input, token, scale, scatter_dim, shard_count,
       groups or [], pin_layout)
-  #torch_xla._XLAC._set_all_reduce_token(devctx.device, result[1])
-  #return result[0]
   torch_xla._XLAC._set_all_reduce_token(devctx.device, result[-1])
   return result[:-1]
 
