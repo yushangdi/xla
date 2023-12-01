@@ -40,7 +40,7 @@ ReduceScatter::ReduceScatter(AllReduceType reduce_type,
                              int64_t scatter_dim, int64_t shard_count,
                              std::vector<std::vector<int64_t>> groups,
                              bool pin_layout)
-    : XlaNode(xla_reduce_scatter, GetOperandList(inputs, token),
+    : XlaNode(xla_reduce_scatter, GetOperandListWithToken(inputs, token),
               [&]() {
                 return NodeOutputShape(reduce_type, inputs, token, scale,
                                        scatter_dim, shard_count, groups,

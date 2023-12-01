@@ -81,7 +81,7 @@ ReduceScatterResult BuildReduceScatter(
     xla::XlaOp token, double scale, int64_t scatter_dim, int64_t shard_count,
     const std::vector<std::vector<int64_t>>& groups, bool pin_layout);
 
-std::vector<torch::lazy::Value> GetOperandList(
+std::vector<torch::lazy::Value> GetOperandListWithToken(
     c10::ArrayRef<torch::lazy::Value> operands,
     const torch::lazy::Value& token);
 
