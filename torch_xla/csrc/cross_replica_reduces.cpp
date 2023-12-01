@@ -322,6 +322,8 @@ ReduceScatterResultCoalesced BuildReduceScatterCoalesced(
   std::vector<xla::XlaOp> result(inputs.size());
   for (auto& type_ctx : cc_ctx.contexts) {
     xla::XlaOp reduce_result;
+    type_ctx.second.ops[0] = token_handler.GetInput(
+		            type_ctx.second.ops[0], &type_ctx.second.operand_shapes[0]);
     if (pin_layout) {
       reduce_result = xla::ReduceScatter(
           xla::Tuple(inputs[0].builder(), type_ctx.second.ops),
