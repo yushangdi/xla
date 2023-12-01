@@ -404,7 +404,7 @@ reduce_scatter_coalesced(const std::vector<XLATensorPtr>& outputs,
   for (auto& input : inputs) {
     input_values.push_back(input->GetIrValue());
   }
-  torch::lazy::NodePtr node = torch::lazy::MakeNode<ReduceScatter>(
+  torch::lazy::NodePtr node = torch::lazy::MakeNode<ReduceScatterCoalesced>(
       reduce_type, input_values, token, scale, scatter_dim, shard_count,
       std::move(groups), pin_layout);
   std::vector<XLATensorPtr> result;

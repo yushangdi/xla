@@ -736,8 +736,7 @@ def reduce_scatter(reduce_type,
         defines two groups, one with the `[0, 1, 2, 3]` replicas and one with
         the `[4, 5, 6, 7]` replicas. If `None` there will be only one group with
         all the replicas in it.
-    output: Optional output tensor
-    output: Optional output tensor if `input` is a torch.Tensor or a list of 
+    output: Optional output tensor if `input` is a torch.Tensor, or a list of
       torch.Tensor if `input` is a list of torch.Tensor.
     pin_layout (bool, optional): whether to pin the layout for this communication op.
       Layout pining can prevent potential data corruption when each process that
@@ -769,8 +768,14 @@ def reduce_scatter(reduce_type,
     return result[0]
 
   # Now the input should be a list of Tensors.
-  if not isinstance(input, list) or any(
-      not isinstance(v, torch.Tensor) for v in input):
+  elif isinstance(input, list) and all(
+      isinstance(v, torch.Tensor) for v in input):
+    result = torch_xla._XLAC._xla_reduce_scatter_coalesced(
+        reduce_type, output or [], input, token, scale, scatter_dim,
+        shard_count, groups or [], pin_layout)
+    torch_xla._XLAC._set_all_reduce_token(devctx.device, result[-1])
+    return result[:-1]
+  else:
     raise TypeError("`input` needs to be a Tensor or a list of Tensors, but "
                     f"given {type(input)}.")
     if output != None:
@@ -782,12 +787,6 @@ def reduce_scatter(reduce_type,
       if len(output) != len(input):
         raise ValueError("`output` length doesn't match `input` length: "
                          f"{len(output)} vs {len(input)}.")
-
-  result = torch_xla._XLAC._xla_reduce_scatter_coalesced(
-      reduce_type, output or [], input, token, scale, scatter_dim, shard_count,
-      groups or [], pin_layout)
-  torch_xla._XLAC._set_all_reduce_token(devctx.device, result[-1])
-  return result[:-1]
 
 
 def add_step_closure(closure, args=(), run_async=False):
