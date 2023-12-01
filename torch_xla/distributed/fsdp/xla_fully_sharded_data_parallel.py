@@ -405,6 +405,20 @@ class XlaFullyShardedDataParallel(nn.Module):
     # When `_shard_param_on_dim_0` is True, we shard and all-gather model parameter tensors
     # only along their dim 0 without flattening the parameter
     self._shard_param_on_dim_0 = shard_param_on_dim_0 and not flatten_parameters
+    # Allow specifying groups for the sharding collective ops, useful for mixing
+    # FSDP data parallelism with model parallelism (e.g. Megatron)
+    self.sharding_groups = sharding_groups
+    if sharding_groups is None:
+      self.rank = xm.get_ordinal()
+      self.world_size = xm.xrt_world_size()
+    else:
+      if sharding_rank is None or sharding_world_size is None:
+        raise ValueError(
+            "sharding_rank and sharding_world_size must be provided when sharding_groups is specified"
+        )
+      self.rank = sharding_rank
+      self.world_size = sharding_world_size
+
     # Set layout pinning to False in all_gather, all_reduce, and reduce_scatter so that they can work together
     # TODO (ronghanghu): change the default layout pinning to True after it's supported simultaneously
     # on all collective ops (see https://github.com/pytorch/xla/pull/3511 for details)
@@ -430,20 +444,6 @@ class XlaFullyShardedDataParallel(nn.Module):
       self.optimization_barrier_op = lambda *args: None
     else:
       self.optimization_barrier_op = xm.optimization_barrier_
-
-    # Allow specifying groups for the sharding collective ops, useful for mixing
-    # FSDP data parallelism with model parallelism (e.g. Megatron)
-    self.sharding_groups = sharding_groups
-    if sharding_groups is None:
-      self.rank = xm.get_ordinal()
-      self.world_size = xm.xrt_world_size()
-    else:
-      if sharding_rank is None or sharding_world_size is None:
-        raise ValueError(
-            "sharding_rank and sharding_world_size must be provided when sharding_groups is specified"
-        )
-      self.rank = sharding_rank
-      self.world_size = sharding_world_size
 
     # Options for debugging
     # - set _debug_dummy_forward_pass=True to check for parameter-only memory consumption
