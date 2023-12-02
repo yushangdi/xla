@@ -17,6 +17,7 @@ import torch_xla
 from torch_xla.core import xla_model as xm
 from torch_xla.core import dynamo_bridge
 from torch_xla.debug import metrics
+import torch_xla.experimental.quantized
 import torch._dynamo as torchdynamo
 from torch.utils import _pytree as pytree
 
@@ -220,9 +221,10 @@ class XLAExportInterpreter(torch.fx.Interpreter):
     if n.op == 'placeholder':
       fake_t = n.meta['val']
       res = super().run_node(n)
-      for i, x in enumerate(fake_t.shape):
-        if not isinstance(x, int):
-          torch_xla._XLAC._xla_mark_dynamic(res, i)
+      if hasattr(fake_t, 'shape'):
+        for i, x in enumerate(fake_t.shape):
+          if not isinstance(x, int):
+            torch_xla._XLAC._xla_mark_dynamic(res, i)
       return res
     return super().run_node(n)
 
@@ -355,7 +357,7 @@ def _exported_program_to_stablehlo_bundle(exported_model,
   output_signature = [
       VariableSignature(
           shape=list(tensor.shape),
-          dtype=str(tensor_value.dtype).replace('torch.', '')) for tensor in res
+          dtype=str(tensor.dtype).replace('torch.', '')) for tensor in res
   ]
 
   torch_xla._XLAC._clear_pending_irs(str(device))

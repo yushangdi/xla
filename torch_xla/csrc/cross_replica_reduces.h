@@ -30,6 +30,11 @@ struct AllGatherResult {
   xla::XlaOp token;
 };
 
+struct AllGatherResultCoalesced {
+  std::vector<xla::XlaOp> result;
+  xla::XlaOp token;
+};
+
 struct CollectivePermuteResult {
   xla::XlaOp result;
   xla::XlaOp token;
@@ -70,6 +75,11 @@ AllGatherResult BuildAllGather(xla::XlaOp input, xla::XlaOp token, int64_t dim,
                                int64_t shard_count,
                                const std::vector<std::vector<int64_t>>& groups,
                                bool pin_layout);
+
+AllGatherResultCoalesced BuildAllGatherCoalesced(
+    absl::Span<const xla::XlaOp> inputs, xla::XlaOp token, int64_t dim,
+    int64_t shard_count, const std::vector<std::vector<int64_t>>& groups,
+    bool pin_layout);
 
 CollectivePermuteResult BuildCollectivePermute(
     xla::XlaOp input, xla::XlaOp token,

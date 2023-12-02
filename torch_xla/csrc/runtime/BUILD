@@ -82,6 +82,7 @@ cc_library(
     ":computation_client",
     ":debug_macros",
     ":env_vars",
+    ":operation_manager",
     ":profiler",
     ":stablehlo_helper",
     ":tensor_source",
@@ -100,6 +101,7 @@ cc_library(
     "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
     "@tsl//tsl/profiler/lib:traceme",
     "@tsl//tsl/platform/cloud:gcs_file_system",
+    "@tsl//tsl/platform:env",
     "@com_google_absl//absl/strings",
     "@com_google_absl//absl/synchronization",
     "@com_google_absl//absl/types:span",
@@ -187,6 +189,18 @@ cc_library(
     ],
 )
 
+cc_library(
+  name = "operation_manager",
+  srcs = ["operation_manager.cc"],
+  hdrs = ["operation_manager.h"],
+  visibility = ["//visibility:private"],
+  deps = [
+    ":debug_macros",
+    ":tf_logging",
+    "@com_google_absl//absl/types:span",
+  ],
+)
+
 # Profiler silently fails unless we link these backends
 cc_library(
   name = "profiler_backends",
@@ -233,6 +247,7 @@ cc_library(
     deps = [
         ":types",
         ":xla_util",
+        "@stablehlo//:stablehlo_portable_api",
         "@stablehlo//:stablehlo_serialization",
         "@xla//xla/translate/hlo_to_mhlo:hlo_to_mlir_hlo",
         "@xla//xla/translate/mhlo_to_hlo:mlir_hlo_to_hlo",
