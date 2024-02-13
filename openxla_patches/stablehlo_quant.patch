@@ -1,0 +1,306 @@
+diff --git a/third_party/stablehlo/stablehlo_quant_seralization.patch b/third_party/stablehlo/stablehlo_quant_seralization.patch
+new file mode 100644
+index 000000000..24e23b67d
+--- /dev/null
++++ b/third_party/stablehlo/stablehlo_quant_seralization.patch
+@@ -0,0 +1,26 @@
++diff --git a/stablehlo/api/PortableApi.cpp b/stablehlo/api/PortableApi.cpp
++index 07c856db..cd169cae 100644
++--- a/stablehlo/api/PortableApi.cpp
+++++ b/stablehlo/api/PortableApi.cpp
++@@ -15,10 +15,13 @@ limitations under the License.
++ 
++ #include "stablehlo/api/PortableApi.h"
++ 
+++#include <iostream>
++ #include <string>
++ 
++ #include "mlir/Bytecode/BytecodeWriter.h"
++ #include "mlir/Dialect/Func/IR/FuncOps.h"
+++#include "mlir/Dialect/Quant/QuantOps.h"
+++#include "mlir/Dialect/Quant/QuantTypes.h"
++ #include "mlir/IR/MLIRContext.h"
++ #include "mlir/Parser/Parser.h"
++ #include "stablehlo/dialect/Serialization.h"
++@@ -33,6 +36,7 @@ void loadSerializationDialects(MLIRContext* context) {
++   context->loadDialect<mlir::func::FuncDialect>();
++   context->loadDialect<mlir::stablehlo::StablehloDialect>();
++   context->loadDialect<mlir::vhlo::VhloDialect>();
+++  context->loadDialect<mlir::quant::QuantizationDialect>();
++ }
++ }  // namespace
++ 
+diff --git a/third_party/stablehlo/stablehlo_quant_vhlo.patch b/third_party/stablehlo/stablehlo_quant_vhlo.patch
+new file mode 100644
+index 000000000..cd9cff214
+--- /dev/null
++++ b/third_party/stablehlo/stablehlo_quant_vhlo.patch
+@@ -0,0 +1,256 @@
++diff --git a/stablehlo/dialect/VhloBytecode.cpp b/stablehlo/dialect/VhloBytecode.cpp
++index af0cb7c8..f730ada6 100644
++--- a/stablehlo/dialect/VhloBytecode.cpp
+++++ b/stablehlo/dialect/VhloBytecode.cpp
++@@ -323,6 +323,18 @@ enum TypeCode {
++   ///   FloatF8E4M3B11FNUZV1Type {
++   ///   }
++   kFloatF8E4M3B11FNUZV1Type = 29,
+++
+++  ///   UniformQuantizedPerAxisV1Type {
+++  ///     flags: varint
+++  ///     storageType: Type
+++  ///     expressedType: Type
+++  ///     quantizedDimension: svarint
+++  ///     scales: list of APFloat
+++  ///     zeroPoints: list of svarint
+++  ///     storageTypeMin: svarint
+++  ///     storageTypeMax: svarint
+++  ///   }
+++  kUniformQuantizedPerAxisV1Type = 30,
++ };
++ 
++ }  // namespace vhlo_encoding
++@@ -419,6 +431,8 @@ class VhloBytecodeInterface : public BytecodeDialectInterface {
++                                             bool hasEncoding) const;
++   TokenV1Type readTokenV1Type(DialectBytecodeReader &reader) const;
++   TupleV1Type readTupleV1Type(DialectBytecodeReader &reader) const;
+++  UniformQuantizedPerAxisV1Type readUniformQuantizedPerAxisV1Type(
+++      DialectBytecodeReader &reader) const;
++   UniformQuantizedV1Type readUniformQuantizedV1Type(
++       DialectBytecodeReader &reader) const;
++   UnrankedTensorV1Type readUnrankedTensorV1Type(
++@@ -431,6 +445,8 @@ class VhloBytecodeInterface : public BytecodeDialectInterface {
++   void write(RankedTensorV1Type type, DialectBytecodeWriter &writer) const;
++   void write(TokenV1Type type, DialectBytecodeWriter &writer) const;
++   void write(TupleV1Type type, DialectBytecodeWriter &writer) const;
+++  void write(UniformQuantizedPerAxisV1Type type,
+++             DialectBytecodeWriter &writer) const;
++   void write(UniformQuantizedV1Type type, DialectBytecodeWriter &writer) const;
++   void write(UnrankedTensorV1Type type, DialectBytecodeWriter &writer) const;
++ };
++@@ -971,6 +987,8 @@ Type VhloBytecodeInterface::readType(DialectBytecodeReader &reader) const {
++       return readTokenV1Type(reader);
++     case vhlo_encoding::kTupleV1Type:
++       return readTupleV1Type(reader);
+++    case vhlo_encoding::kUniformQuantizedPerAxisV1Type:
+++      return readUniformQuantizedPerAxisV1Type(reader);
++     case vhlo_encoding::kUniformQuantizedV1Type:
++       return readUniformQuantizedV1Type(reader);
++     case vhlo_encoding::kUnrankedTensorV1Type:
++@@ -988,11 +1006,11 @@ LogicalResult VhloBytecodeInterface::writeType(
++     Type type, DialectBytecodeWriter &writer) const {
++   return TypeSwitch<Type, LogicalResult>(type)
++       .Case<ComplexV1Type, FunctionV1Type, RankedTensorV1Type, TokenV1Type,
++-            TupleV1Type, UnrankedTensorV1Type, UniformQuantizedV1Type>(
++-          [&](auto type) {
++-            LOG_WRITE_CALL;
++-            return write(type, writer), success();
++-          })
+++            TupleV1Type, UnrankedTensorV1Type, UniformQuantizedPerAxisV1Type,
+++            UniformQuantizedV1Type>([&](auto type) {
+++        LOG_WRITE_CALL;
+++        return write(type, writer), success();
+++      })
++       .Case([&](BooleanV1Type) {
++         LOG_WRITE_CALL;
++         return writer.writeVarInt(vhlo_encoding::kBooleanV1Type), success();
++@@ -1197,6 +1215,70 @@ void VhloBytecodeInterface::write(TupleV1Type type,
++   writer.writeTypes(type.getTypes());
++ }
++ 
+++//===----------------------------------------------------------------------===//
+++// UniformQuantizedPerAxisV1Type
+++//===----------------------------------------------------------------------===//
+++
+++UniformQuantizedPerAxisV1Type
+++VhloBytecodeInterface::readUniformQuantizedPerAxisV1Type(
+++    DialectBytecodeReader &reader) const {
+++  LOG_READ_CALL;
+++  uint64_t flags;
+++  Type storageType, expressedType;
+++  FailureOr<APFloat> scale;
+++  SmallVector<APFloat> scales;
+++  SmallVector<int64_t> zeroPoints;
+++  int64_t quantizedDimension, numQuantizationParams, storageTypeMin,
+++      storageTypeMax;
+++  if (failed(reader.readVarInt(flags)) ||
+++      failed(reader.readType(storageType)) ||
+++      failed(reader.readType(expressedType)) ||
+++      failed(reader.readSignedVarInt(quantizedDimension)) ||
+++      failed(reader.readSignedVarInt(numQuantizationParams)))
+++    return reader.emitError("invalid UniformQuantizedPerAxisType"),
+++           UniformQuantizedPerAxisV1Type();
+++
+++  for (int64_t i = 0; i < numQuantizationParams; i++) {
+++    if (failed(scale = reader.readAPFloatWithKnownSemantics(
+++                   llvm::APFloat::IEEEdouble())))
+++      return reader.emitError("invalid UniformQuantizedPerAxisType"),
+++             UniformQuantizedPerAxisV1Type();
+++    scales.push_back(scale.value());
+++  }
+++
+++  for (int64_t i = 0; i < numQuantizationParams; i++) {
+++    if (failed(reader.readSignedVarInt(zeroPoints.emplace_back())))
+++      return reader.emitError("invalid UniformQuantizedPerAxisType"),
+++             UniformQuantizedPerAxisV1Type();
+++  }
+++
+++  if (failed(reader.readSignedVarInt(storageTypeMin)) ||
+++      failed(reader.readSignedVarInt(storageTypeMax)))
+++    return reader.emitError("invalid UniformQuantizedPerAxisType"),
+++           UniformQuantizedPerAxisV1Type();
+++
+++  return UniformQuantizedPerAxisV1Type::get(
+++      getContext(), flags, storageType, expressedType, quantizedDimension,
+++      scales, zeroPoints, storageTypeMin, storageTypeMax);
+++}
+++
+++void VhloBytecodeInterface::write(UniformQuantizedPerAxisV1Type type,
+++                                  DialectBytecodeWriter &writer) const {
+++  writer.writeVarInt(vhlo_encoding::kUniformQuantizedPerAxisV1Type);
+++  writer.writeVarInt(type.getFlags());
+++  writer.writeType(type.getStorageType());
+++  writer.writeType(type.getExpressedType());
+++  writer.writeSignedVarInt(type.getQuantizedDimension());
+++  int64_t numQuantizationParams = type.getScales().size();
+++  writer.writeSignedVarInt(numQuantizationParams);
+++  for (auto scale : type.getScales())
+++    writer.writeAPFloatWithKnownSemantics(APFloat(scale));
+++  for (auto zeroPoint : type.getZeroPoints())
+++    writer.writeSignedVarInt(zeroPoint);
+++  writer.writeSignedVarInt(type.getStorageTypeMin());
+++  writer.writeSignedVarInt(type.getStorageTypeMax());
+++}
+++
++ //===----------------------------------------------------------------------===//
++ // UniformQuantizedV1Type
++ //===----------------------------------------------------------------------===//
++diff --git a/stablehlo/dialect/VhloTypes.cpp b/stablehlo/dialect/VhloTypes.cpp
++index 35a76c9e..49b1acd9 100644
++--- a/stablehlo/dialect/VhloTypes.cpp
+++++ b/stablehlo/dialect/VhloTypes.cpp
++@@ -120,6 +120,18 @@ void VhloTypeConverter::addBuiltinToVhloConversions() {
++         convertedExpressedType, APFloat(type.getScale()), type.getZeroPoint(),
++         type.getStorageTypeMin(), type.getStorageTypeMax());
++   });
+++  addConversion([&](quant::UniformQuantizedPerAxisType type) -> Type {
+++    Type convertedStorageType = convertType(type.getStorageType());
+++    Type convertedExpressedType = convertType(type.getExpressedType());
+++    if (!convertedStorageType || !convertedExpressedType) return {};
+++    SmallVector<APFloat> scales = llvm::to_vector(llvm::map_range(
+++        type.getScales(), [](double scale) { return APFloat(scale); }));
+++    return vhlo::UniformQuantizedPerAxisV1Type::get(
+++        type.getContext(), type.getFlags(), convertedStorageType,
+++        convertedExpressedType, type.getQuantizedDimension(), scales,
+++        type.getZeroPoints(), type.getStorageTypeMin(),
+++        type.getStorageTypeMax());
+++  });
++   addConversion([&](UnrankedTensorType type) -> Type {
++     auto convertedElementType = convertType(type.getElementType());
++     if (!convertedElementType) return {};
++@@ -223,6 +235,18 @@ void VhloTypeConverter::addVhloToBuiltinConversions() {
++         type.getScale().convertToDouble(), type.getZeroPoint(),
++         type.getStorageTypeMin(), type.getStorageTypeMax());
++   });
+++  addConversion([&](UniformQuantizedPerAxisV1Type type) -> Type {
+++    Type convertedStorageType = convertType(type.getStorageType());
+++    Type convertedExpressedType = convertType(type.getExpressedType());
+++    if (!convertedStorageType || !convertedExpressedType) return {};
+++    SmallVector<double> scales = llvm::to_vector(llvm::map_range(
+++        type.getScales(),
+++        [](const APFloat& scale) { return scale.convertToDouble(); }));
+++    return quant::UniformQuantizedPerAxisType::get(
+++        type.getFlags(), convertedStorageType, convertedExpressedType, scales,
+++        type.getZeroPoints(), type.getQuantizedDimension(),
+++        type.getStorageTypeMin(), type.getStorageTypeMax());
+++  });
++   addConversion([&](UnrankedTensorV1Type type) -> Type {
++     auto convertedElementType = convertType(type.getElementType());
++     if (!convertedElementType) return {};
++diff --git a/stablehlo/dialect/VhloTypes.td b/stablehlo/dialect/VhloTypes.td
++index 493b4d24..aa8f5bae 100644
++--- a/stablehlo/dialect/VhloTypes.td
+++++ b/stablehlo/dialect/VhloTypes.td
++@@ -228,6 +228,71 @@ def VHLO_UniformQuantizedV1 : VHLO_TypeDef<"UniformQuantizedV1", "quant_v1", "0.
++   }];
++   let assemblyFormat = "`<` $storageType `` `:` `` $expressedType `,` $scale `` `:` `` $zeroPoint `,` $storageTypeMin `` `:` `` $storageTypeMax `,` $flags `>`";
++ }
+++def VHLO_QuantizationScalesV1 : ArrayRefParameter<"::llvm::APFloat", "array of double scales"> {
+++  let parser = [{
+++    [&]() -> FailureOr<llvm::SmallVector<::llvm::APFloat>> {
+++      ::llvm::SmallVector<double> scales;
+++
+++      auto parseResult = $_parser.parseCommaSeparatedList(AsmParser::Delimiter::Square, [&]() {
+++        return $_parser.parseFloat(scales.emplace_back());
+++      });
+++      if(failed(parseResult)) return failure();
+++      return llvm::to_vector(llvm::map_range(
+++        scales, [](double scale) { return APFloat(scale); }));
+++    }()
+++  }];
+++  let printer = [{
+++    $_printer << '[';
+++    llvm::interleaveComma($_self, $_printer, [&](APFloat scale) {
+++      $_printer << scale;
+++    });
+++    $_printer << ']';
+++  }];
+++}
+++def VHLO_QuantizationZeroPointsV1 : ArrayRefParameter<"int64_t", "array of int64_t zero points"> {
+++  let parser = [{
+++    [&]() -> FailureOr<llvm::SmallVector<int64_t>> {
+++      ::llvm::SmallVector<int64_t> zeroPoints;
+++
+++      auto parseResult = $_parser.parseCommaSeparatedList(AsmParser::Delimiter::Square, [&]() {
+++        return $_parser.parseInteger(zeroPoints.emplace_back());
+++      });
+++      if(failed(parseResult)) return failure();
+++      return zeroPoints;
+++    }()
+++  }];
+++  let printer = [{
+++    $_printer << '[';
+++    llvm::interleaveComma($_self, $_printer, [&](int64_t zeroPoint) {
+++      $_printer << zeroPoint;
+++    });
+++    $_printer << ']';
+++  }];
+++}
+++def VHLO_UniformQuantizedPerAxisV1 : VHLO_TypeDef<"UniformQuantizedPerAxisV1", "quant_per_axis_v1", "0.9.0", "current"> {
+++  let parameters = (ins
+++    "unsigned":$flags,
+++    "::mlir::Type":$storageType,
+++    "::mlir::Type":$expressedType,
+++    "int64_t":$quantizedDimension,
+++    VHLO_QuantizationScalesV1:$scales,
+++    VHLO_QuantizationZeroPointsV1:$zeroPoints,
+++    "int64_t":$storageTypeMin,
+++    "int64_t":$storageTypeMax
+++  );
+++  let genVerifyDecl = 1;
+++  let extraClassDefinition = [{
+++    LogicalResult UniformQuantizedPerAxisV1Type::verify(
+++        llvm::function_ref<mlir::InFlightDiagnostic ()> errFn,
+++        unsigned int, mlir::Type storageType, mlir::Type expressedType,
+++        int64_t, ::llvm::ArrayRef<::llvm::APFloat>, ::llvm::ArrayRef<int64_t>, int64_t, int64_t) {
+++      if (!isFromVhlo(storageType) || !isFromVhlo(expressedType))
+++        return errFn() << "expected VHLO type";
+++      return success();
+++    }
+++  }];
+++  let assemblyFormat = "`<` $storageType `` `:` `` $expressedType `,` $quantizedDimension `,` $scales `,` $zeroPoints `,` $storageTypeMin `` `:` `` $storageTypeMax `,` $flags `>`";
+++}
++ 
++ // TODO(#8): UnrankedTensor is not part of the StableHLO spec.
++ // At the moment, it is used to represent unranked dynamism, and we will likely
+diff --git a/third_party/stablehlo/workspace.bzl b/third_party/stablehlo/workspace.bzl
+index dfb6c1ea5..8fd4584ef 100644
+--- a/third_party/stablehlo/workspace.bzl
++++ b/third_party/stablehlo/workspace.bzl
+@@ -15,5 +15,7 @@ def repo():
+         urls = tf_mirror_urls("https://github.com/openxla/stablehlo/archive/{commit}.zip".format(commit = STABLEHLO_COMMIT)),
+         patch_file = [
+             "//third_party/stablehlo:temporary.patch",  # Autogenerated, don't remove.
++            "//third_party/stablehlo:stablehlo_quant_seralization.patch",  # Load quant dialect.
++            "//third_party/stablehlo:stablehlo_quant_vhlo.patch",  # Load quant dialect.
+         ],
+     )
