@@ -70,6 +70,11 @@ class GraphInputMatcher:
       real_input.append(inp)
     return real_input
 
+  def print_cached_tensor_buffers(self):
+    str = torch_xla._XLAC._check_tensor_pjrt_buffer_address(self.graph_input_xla_values)
+    print("Print buffer from graph matcher {}>>>>>\n".format(id(self)))
+    print(str)
+    print("<<<<<")
 
 def get_fallback_ops():
   fallback_ops = []
@@ -305,7 +310,7 @@ def extract_graph_helper(xla_model: torch.fx.GraphModule):
   graph_input_matcher = GraphInputMatcher(tensor_id_to_arg_idx,
                                           graph_input_tensor_ids,
                                           graph_input_xla_values)
-
+  graph_input_matcher.print_cached_tensor_buffers()
   # compiles and cache graph rooted at tensors in 'args_and_out'
   torch_xla._XLAC._xla_warm_up_cache(args_and_out, [])
 

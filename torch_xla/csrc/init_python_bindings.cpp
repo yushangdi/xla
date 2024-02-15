@@ -46,6 +46,7 @@
 #include "torch_xla/csrc/runtime/metrics_analysis.h"
 #include "torch_xla/csrc/runtime/metrics_reader.h"
 #include "torch_xla/csrc/runtime/pjrt_registry.h"
+#include "torch_xla/csrc/runtime/pjrt_computation_client.h"
 #include "torch_xla/csrc/runtime/profiler.h"
 #include "torch_xla/csrc/runtime/runtime.h"
 #include "torch_xla/csrc/runtime/sys_util.h"
@@ -2293,6 +2294,36 @@ void InitXlaModuleBindings(py::module m) {
             xtensors.push_back(bridge::TryGetXlaTensor(tensor));
           }
           return check_materialization_helper(xtensors);
+        });
+  m.def("_check_tensor_pjrt_buffer_address",
+        [](const std::vector<at::Tensor>& tensors) -> std::string {
+          std::vector<XLATensorPtr> xtensors;
+          xtensors.reserve(tensors.size());
+          for (const at::Tensor& tensor : tensors) {
+            xtensors.push_back(bridge::TryGetXlaTensor(tensor));
+          }
+          std::stringstream ss;
+          for (auto& xtensor : xtensors) {
+            if (!xtensor) {
+              // Not a xla tensor
+              ss << "Not a xla tensor";
+            } else {
+              auto data = xtensor->GetXlaData();
+              if (data) {
+                if (data->HasValue()) {
+                  ss << "pjrt_buffer=" << data->GetHandle() << ",";
+                } else {
+                  // No pjrt buffer
+                  ss << "No pjrt buffer";
+                }
+              } else {
+                // No xla data
+                ss << "No xla data";
+              }
+            }
+            ss << "\n";
+          }
+          return ss.str();
         });
 
   // Return true if value of the any tensor in this devicerequires a
