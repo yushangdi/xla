@@ -65,8 +65,10 @@ class GraphInputMatcher:
             (1012031 + inp.item() * 7012063) % 18446744073709551615, str_device)
       elif arg_idx is None:
         inp = traced_xla_value
+        # print("check trace_xla_value: {}".format(inp.shape))
       else:
         inp = args[arg_idx]
+        # print("check args: {}".format(inp.shape))
       real_input.append(inp)
     return real_input
 

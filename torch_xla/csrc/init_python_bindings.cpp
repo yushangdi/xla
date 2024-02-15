@@ -45,8 +45,8 @@
 #include "torch_xla/csrc/runtime/metrics.h"
 #include "torch_xla/csrc/runtime/metrics_analysis.h"
 #include "torch_xla/csrc/runtime/metrics_reader.h"
-#include "torch_xla/csrc/runtime/pjrt_registry.h"
 #include "torch_xla/csrc/runtime/pjrt_computation_client.h"
+#include "torch_xla/csrc/runtime/pjrt_registry.h"
 #include "torch_xla/csrc/runtime/profiler.h"
 #include "torch_xla/csrc/runtime/runtime.h"
 #include "torch_xla/csrc/runtime/sys_util.h"
@@ -2311,7 +2311,11 @@ void InitXlaModuleBindings(py::module m) {
               auto data = xtensor->GetXlaData();
               if (data) {
                 if (data->HasValue()) {
-                  ss << "pjrt_buffer=" << data->GetHandle() << ",";
+                  torch_xla::runtime::ComputationClient::DataPtr xla_data =
+                      std::dynamic_pointer_cast<
+                          torch_xla::runtime::ComputationClient::Data>(data);
+                  ss << "pjrt_buffer=" << xla_data->GetHandle()
+                     << ", shape=" << xla_data->shape().ToString() << ",";
                 } else {
                   // No pjrt buffer
                   ss << "No pjrt buffer";

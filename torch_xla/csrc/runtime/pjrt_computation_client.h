@@ -116,8 +116,7 @@ class PjRtComputationClient : public ComputationClient {
     XLA_ERROR() << __FUNCTION__ << " not implemented";
   };
 
-//  private:
-public:
+ private:
   std::unique_ptr<xla::PjRtClient> client_;
   std::unique_ptr<XlaCoordinator> coordinator_;
   // global_ordinals_ tracks a map from PjRtDeviceId to the device's
