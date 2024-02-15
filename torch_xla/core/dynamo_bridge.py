@@ -71,10 +71,10 @@ class GraphInputMatcher:
     return real_input
 
   def print_cached_tensor_buffers(self):
-    str = torch_xla._XLAC._check_tensor_pjrt_buffer_address(self.graph_input_xla_values)
-    print("Print buffer from graph matcher {}>>>>>\n".format(id(self)))
-    print(str)
-    print("<<<<<")
+    torch_xla._XLAC._check_tensor_pjrt_buffer_address(self.graph_input_xla_values)
+    # print("Print buffer from graph matcher {}>>>>>\n".format(id(self)))
+    # print(str)
+    # print("<<<<<")
 
 def get_fallback_ops():
   fallback_ops = []

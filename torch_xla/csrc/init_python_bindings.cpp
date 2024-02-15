@@ -2296,7 +2296,7 @@ void InitXlaModuleBindings(py::module m) {
           return check_materialization_helper(xtensors);
         });
   m.def("_check_tensor_pjrt_buffer_address",
-        [](const std::vector<at::Tensor>& tensors) -> std::string {
+        [](const std::vector<at::Tensor>& tensors) {
           std::vector<XLATensorPtr> xtensors;
           xtensors.reserve(tensors.size());
           for (const at::Tensor& tensor : tensors) {
@@ -2323,7 +2323,7 @@ void InitXlaModuleBindings(py::module m) {
             }
             ss << "\n";
           }
-          return ss.str();
+          TF_VLOG(2) << "start buffers\n" << ss.str() << "end buffers\n";
         });
 
   // Return true if value of the any tensor in this devicerequires a
