@@ -137,17 +137,27 @@ class PjRtComputationClient : public ComputationClient {
 
   struct PjRtData : public Data {
     PjRtData(std::string device, xla::Shape device_shape)
-        : Data(std::move(device), std::move(device_shape)) {}
+        : Data(std::move(device), std::move(device_shape)) {
+      std::cout << "ctor: " << this->PrintBufferSizeInBytes() << std::endl;
+    }
 
     PjRtData(std::string device, xla::Shape device_shape,
              std::shared_ptr<xla::PjRtBuffer> buffer)
-        : Data(std::move(device), std::move(device_shape)), buffer(buffer) {}
+        : Data(std::move(device), std::move(device_shape)), buffer(buffer) {
+      std::cout << "ctor: " << this->PrintBufferSizeInBytes() << std::endl;
+    }
 
     PjRtData(std::string device, std::shared_ptr<xla::PjRtBuffer> buffer)
         : Data(std::move(device),
                xla::Shape(buffer->element_type(), buffer->dimensions(),
                           buffer->is_dynamic_dimension(), {})),
-          buffer(buffer) {}
+          buffer(buffer) {
+      std::cout << "ctor: " << this->PrintBufferSizeInBytes() << std::endl;
+    }
+    
+    virtual ~PjRtData() {
+      std::cout << "dtor: " << this->PrintBufferSizeInBytes() << std::endl;
+    }
 
     Handle GetHandle() override {
       XLA_CHECK(HasValue())
@@ -166,6 +176,19 @@ class PjRtComputationClient : public ComputationClient {
       XLA_CHECK(false) << "GetSharding should not be called on PjRtData, check "
                           "HasSharding first";
       return xla::OpSharding();
+    }
+
+    size_t PrintBufferSizeInBytes() const {
+      if (buffer) {
+        auto size = buffer->GetOnDeviceSizeInBytes();
+        if (size.ok()) {
+          return size.value();
+        } else {
+          return 0;
+        }
+      } else {
+        return 0;
+      }
     }
 
     std::string ToString() const override {
