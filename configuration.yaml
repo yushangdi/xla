@@ -251,6 +251,11 @@ variables:
       description:
         - Number of GPU devices being used by this instance of XRT.
       type: int
+    NEURONCORE_NUM_DEVICES:
+      description:
+        - Number of NeuronCores being used by this instance of XRT.
+      type: int
+      default_value: 1
   debug_variables:
     XLA_FNTRACKER_FILE:
       description:
