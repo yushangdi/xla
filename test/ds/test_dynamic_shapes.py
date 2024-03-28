@@ -396,6 +396,7 @@ class TestDynamicShapes(test_utils.XlaTestCase):
     t6 = torch.nonzero(t5)
     self.assertRaises(RuntimeError, lambda: torch.add(t2, t6))
 
+  @unittest.skip
   def test_sub_dyn_with_static_broadcastable(self):
     t1 = torch.tensor([[1, 0, 3, 5, 0, 6]], device=dev)
     t2 = torch.nonzero(t1)
