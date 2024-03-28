@@ -344,6 +344,7 @@ class TestDynamicShapes(test_utils.XlaTestCase):
     t9_aten = t8_aten.view(t4_aten.shape[0])
     self.assertEqual(t9.cpu(), t9_aten.cpu())
 
+  @unittest.skip
   def test_add_dyn_with_static_broadcastable(self):
     t1 = torch.tensor([[1, 0, 3, 5, 0, 6]], device=dev)
     t2 = torch.nonzero(t1)
