@@ -217,6 +217,7 @@ class PallasTest(unittest.TestCase):
     o = flash_attention(q, k, v)
     expected_o = attention(q, k, v)
     print(o.cpu() - expected_o.cpu())
+    print(torch.max(o.cpu() - expected_o.cpu()))
     self.assertTrue(torch.allclose(o.cpu(), expected_o.cpu()))
     jax.config.update('jax_default_matmul_precision', jax.lax.Precision.DEFAULT)
 
