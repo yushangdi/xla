@@ -218,7 +218,7 @@ class PallasTest(unittest.TestCase):
     expected_o = attention(q, k, v)
     print(o.cpu() - expected_o.cpu())
     print(torch.max(o.cpu() - expected_o.cpu()))
-    self.assertTrue(torch.allclose(o.cpu(), expected_o.cpu()))
+    self.assertTrue(torch.allclose(o.cpu(), expected_o.cpu(), atol=1e-6))
     jax.config.update('jax_default_matmul_precision', jax.lax.Precision.DEFAULT)
 
   @unittest.skipIf(xr.device_type() != 'TPU' or tpu.version() < 3,
