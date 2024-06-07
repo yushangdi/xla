@@ -503,7 +503,8 @@ std::vector<ComputationClient::ComputationPtr> PjRtComputationClient::Compile(
           ConsumeValue(client_->Compile(instance.computation, compile_options));
     }
 
-    const auto& hlo_modules = ConsumeValueNoStackDump(executable->GetHloModules());
+    const auto& hlo_modules =
+        ConsumeValueNoStackDump(executable->GetHloModules());
     xla::HloComputation* hlo_computation = hlo_modules[0]->entry_computation();
     xla::ProgramShape program_shape =
         xla::ProgramShape(hlo_computation->ToProto().program_shape());
