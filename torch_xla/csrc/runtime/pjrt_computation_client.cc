@@ -496,15 +496,14 @@ std::vector<ComputationClient::ComputationPtr> PjRtComputationClient::Compile(
           mlir::ModuleOp::create(mlir::UnknownLoc::get(&context));
       torch_xla::runtime::ConvertHloToStableHlo(
           instance.computation.mutable_proto(), &mlir_module);
-      executable = ConsumeValue(client_->Compile(mlir_module, compile_options));
+      executable = ConsumeValueNoStackDump(client_->Compile(mlir_module, compile_options));
       StableHloCompileCounter()->AddValue(1);
     } else {
       executable =
-          ConsumeValue(client_->Compile(instance.computation, compile_options));
+          ConsumeValueNoStackDump(client_->Compile(instance.computation, compile_options));
     }
 
-    const auto& hlo_modules =
-        ConsumeValueNoStackDump(executable->GetHloModules());
+    const auto& hlo_modules = ConsumeValue(executable->GetHloModules());
     xla::HloComputation* hlo_computation = hlo_modules[0]->entry_computation();
     xla::ProgramShape program_shape =
         xla::ProgramShape(hlo_computation->ToProto().program_shape());
