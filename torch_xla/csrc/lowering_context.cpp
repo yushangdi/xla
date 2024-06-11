@@ -121,6 +121,9 @@ xla::XlaOp LoweringContext::GetParameter(
       shape.set_dynamic_dimension(dim, true);
       shape.set_dimensions(dim, kUnboundedSize);
     }
+    if (shape.element_type() == xla::PrimitiveType::S8) {
+      shape.set_element_type(xla::PrimitiveType::S4);
+    }
     xla::XlaOp param = xla::Parameter(builder(), parameters_.size(), shape,
                                       absl::StrCat("p", parameters_.size()));
     it = parameters_map_.emplace(handle, Parameter{param, parameters_.size()})

@@ -107,6 +107,8 @@ at::ScalarType TorchTypeFromXlaType(xla::PrimitiveType xla_type) {
       return at::ScalarType::Byte;
     case xla::PrimitiveType::S8:
       return at::ScalarType::Char;
+    case xla::PrimitiveType::S4:
+      return at::ScalarType::Char;
     case xla::PrimitiveType::S16:
     case xla::PrimitiveType::U16:
       return at::ScalarType::Short;

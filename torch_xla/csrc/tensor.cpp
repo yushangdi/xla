@@ -189,8 +189,12 @@ runtime::util::MaybeRef<xla::Shape> XLATensor::shape() const {
   }
   XLA_CHECK(data()->tensor_data);
   const torch::lazy::BackendDevice& device = GetDevice();
+  auto dtype = MakeXlaPrimitiveType(data()->tensor_data->type().scalarType(), &device);
+  if (dtype == xla::PrimitiveType::S8) {
+    dtype = xla::PrimitiveType::S4;
+  }
   return xla::ShapeUtil::MakeShape(
-      MakeXlaPrimitiveType(data()->tensor_data->type().scalarType(), &device),
+      dtype,
       XlaHelpers::I64List(data()->tensor_data->sizes()));
 }
 
