@@ -2570,6 +2570,11 @@ void InitXlaModuleBindings(py::module m) {
     XLATensorPtr xtensor = bridge::GetXlaTensor(input);
     xtensor->MarkDynamicDimension(dim);
   });
+  m.def("_xla_mark_int4_tensor", [](const at::Tensor& input, bool is_int4_tensor) {
+    TORCH_LAZY_COUNTER("XlaMarkInt4Tensor", 1);
+    XLATensorPtr xtensor = bridge::GetXlaTensor(input);
+    xtensor->MarkInt4Tensor(is_int4_tensor);
+  });
   m.def("_xla_dynamic_expand",
         [](const at::Tensor& input, const std::vector<int64_t>& size,
            const at::Tensor& src_tensor, int src_dim,

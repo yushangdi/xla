@@ -176,6 +176,7 @@ std::string XlaNode::ToString() const {
   ss << torch::lazy::Node::ToString() << ", xla_shape=" << xla_shape_;
   ss << ", dynamic_dims: (" << absl::StrJoin(unbounded_dynamic_dims_, ", ")
      << ')';
+  ss << ", is_int4_tensor: " << is_int4_tensor_;
   return ss.str();
 }
 

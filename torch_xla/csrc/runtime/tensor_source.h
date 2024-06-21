@@ -39,9 +39,6 @@ class TensorSource {
   }
 
   virtual xla::PrimitiveType primitive_type() const {
-    if (shape().element_type() == xla::PrimitiveType::S8) {
-      return xla::PrimitiveType::S4;
-    }
     return shape().element_type();
   }
 

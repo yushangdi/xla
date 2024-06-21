@@ -110,7 +110,8 @@ static constexpr int64_t kUnboundedSize = std::numeric_limits<int64_t>::min();
 
 xla::XlaOp LoweringContext::GetParameter(
     const std::shared_ptr<torch::lazy::BackendData>& data,
-    const std::unordered_set<uint32_t>& unbounded_dynamic_dims) {
+    const std::unordered_set<uint32_t>& unbounded_dynamic_dims,
+    const bool is_int4_tensor) {
   torch::lazy::BackendData::Handle handle = data->GetHandle();
   auto it = parameters_map_.find(handle);
   if (it == parameters_map_.end()) {
@@ -121,7 +122,7 @@ xla::XlaOp LoweringContext::GetParameter(
       shape.set_dynamic_dimension(dim, true);
       shape.set_dimensions(dim, kUnboundedSize);
     }
-    if (shape.element_type() == xla::PrimitiveType::S8) {
+    if (is_int4_tensor) {
       shape.set_element_type(xla::PrimitiveType::S4);
     }
     xla::XlaOp param = xla::Parameter(builder(), parameters_.size(), shape,

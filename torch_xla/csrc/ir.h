@@ -143,6 +143,14 @@ class XlaNode : public torch::lazy::Node {
     unbounded_dynamic_dims_.insert(dim);
   }
 
+  void MarkInt4Tensor(bool is_int4_tensor) {
+    is_int4_tensor_ = is_int4_tensor;
+  }
+
+  const bool is_int4_tensor() const {
+    return is_int4_tensor_;
+  }
+
   const std::unordered_set<uint32_t>& dynamic_dims() const {
     return unbounded_dynamic_dims_;
   }
@@ -152,6 +160,7 @@ class XlaNode : public torch::lazy::Node {
 
  protected:
   std::unordered_set<uint32_t> unbounded_dynamic_dims_;
+  bool is_int4_tensor_;
 
  private:
   xla::Shape GetOpShape(const std::function<xla::Shape()>& shape_fn) const;

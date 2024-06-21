@@ -49,7 +49,8 @@ class LoweringContext : public torch::lazy::LoweringContext {
   // held in data.
   xla::XlaOp GetParameter(
       const std::shared_ptr<torch::lazy::BackendData>& data,
-      const std::unordered_set<uint32_t>& dynamic_dims = {});
+      const std::unordered_set<uint32_t>& dynamic_dims = {},
+      const bool is_int4_tensor=false);
 
   // Retrieves the vector holding all the tensors associated with the parameter
   // instructions which have been created.

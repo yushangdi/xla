@@ -191,7 +191,8 @@ runtime::util::MaybeRef<xla::Shape> XLATensor::shape() const {
   XLA_CHECK(data()->tensor_data);
   const torch::lazy::BackendDevice& device = GetDevice();
   auto dtype = MakeXlaPrimitiveType(data()->tensor_data->type().scalarType(), &device);
-  if (dtype == xla::PrimitiveType::S8) {
+  auto* xla_node = dynamic_cast<XlaNode*>(GetIrValue().node.get());
+  if (xla_node->is_int4_tensor()) {
     dtype = xla::PrimitiveType::S4;
   }
   return xla::ShapeUtil::MakeShape(
@@ -940,6 +941,11 @@ int64_t XLATensor::GetHandle() const {
 void XLATensor::MarkDynamicDimension(uint32_t dim) {
   auto* xla_node = dynamic_cast<XlaNode*>(GetIrValue().node.get());
   xla_node->MarkDynamicDimension(dim);
+}
+
+void XLATensor::MarkInt4Tensor(bool is_int4_tensor) {
+  auto* xla_node = dynamic_cast<XlaNode*>(GetIrValue().node.get());
+  xla_node->MarkInt4Tensor(is_int4_tensor);
 }
 
 bool XLATensor::SetNodeUserMetadata(

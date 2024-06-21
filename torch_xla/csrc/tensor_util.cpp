@@ -477,10 +477,22 @@ torch::lazy::BackendDataPtr TensorToXlaData(
     return ShardingUtil::CreateShardedData(replicated_data, local_devices,
                                            nullptr);
   }
-
+  std::cout << "at 1" << std::endl;
   std::vector<std::shared_ptr<const runtime::TensorSource>> source_tensors;
+  torch_xla::XLATensorPtr xtensor = torch_xla::bridge::TryGetXlaTensor(tensor);
+  xla::Shape maybe_int4_shape = shape;
+  if (xtensor) {
+    std::cout << "xla tensor is not null" << std::endl;
+    XlaNode* xla_node = dynamic_cast<XlaNode*>(xtensor->GetIrValue().node.get());
+    if (xla_node && xla_node->is_int4_tensor()) {
+      std::cout << "cast to int4" << std::endl;
+      maybe_int4_shape.set_element_type(xla::PrimitiveType::S4);
+    }
+  } else {
+    std::cout << "xla tensor is null" << std::endl;
+  }
   source_tensors.push_back(
-      std::make_shared<runtime::AtenSource>(tensor, shape, device.toString()));
+      std::make_shared<runtime::AtenSource>(tensor, maybe_int4_shape, device.toString()));
 
   auto handles =
       runtime::GetComputationClient()->TransferToDevice(source_tensors);
@@ -710,6 +722,7 @@ std::vector<torch::lazy::BackendDataPtr> CreateTensorsData(
   }
 
   std::vector<std::shared_ptr<const runtime::TensorSource>> source_tensors;
+  std::cout << "at 2" << std::endl;
   for (size_t i = 0; i < tensors.size(); ++i) {
     torch::lazy::BackendDevice device = ParseDeviceString(devices[i]);
     xla::Shape shape = CreateComputationShapeFromTensor(tensors[i], &device);
@@ -751,6 +764,7 @@ std::vector<torch::lazy::BackendDataPtr> CreateTensorsData(
       new_handles.push_back(ShardingUtil::CreateShardedData(
           local_shards, local_devices, shardings[i]));
     } else {
+      std::cout << "at 3" << std::endl;
       source_tensors.push_back(std::make_shared<runtime::AtenSource>(
           tensors[i], std::move(shape), devices[i]));
       new_handles =
