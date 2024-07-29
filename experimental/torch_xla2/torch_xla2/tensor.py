@@ -358,6 +358,8 @@ class Environment(contextlib.ContextDecorator):
 
     def t2j_iso(self, torchtensors):
       def to_jax(x):
+        if not isinstance(x, XLATensor2):
+          breakpoint()
         assert isinstance(x, XLATensor2)
         return x.jax()
       return torch_pytree.tree_map_only(torch.Tensor, to_jax, torchtensors)

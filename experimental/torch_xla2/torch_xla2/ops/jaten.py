@@ -891,6 +891,12 @@ def _aten_linalg_vector_norm(self, ord=2, dim=None, keepdim=False, dtype=None):
   return result
 
 
+@op(torch.ops.aten.linalg_solve)
+@op(torch.linalg.solve)
+def _aten_linalg_solve(A, B, left=True, check_errors=False, out=None):
+  return jnp.linalg.solve(A, B)
+
+
 # aten.reflection_pad1d
 @op(torch.ops.aten.reflection_pad1d)
 def _aten_reflection_pad1d(input, padding):
