@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import tempfile
+import sys
 
 import torch
 import _XLAC
@@ -239,3 +240,5 @@ if os.getenv('XLA_REGISTER_INSTALLED_PLUGINS',
   plugins.register_installed_plugins()
 
 from .torch_xla import *
+
+runtime._maybe_select_default_device()
