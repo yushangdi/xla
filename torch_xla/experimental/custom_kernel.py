@@ -266,6 +266,7 @@ class FlashAttention(torch.autograd.Function):
     with torch.no_grad():
       segment_ids, q_segment_ids, kv_segment_ids = FlashAttention.prepare_segment_ids(
           q_segment_ids, kv_segment_ids)
+      # breakpoint()
       ctx.segment_ids = segment_ids
 
       # We can't directly use flash_attention as we need to override the save_residuals flag which returns
@@ -436,7 +437,8 @@ class FlashAttention(torch.autograd.Function):
               "block_q_major", "block_k_major", "block_k", "block_q",
               "sm_scale", "causal", "mask_value", "debug"
           ])
-
+      # breakpoint()
+      # print(args)
       grads = torch_xla._XLAC._xla_tpu_custom_call(args, payload,
                                                    [k.shape, v.shape],
                                                    [k.dtype, v.dtype])
@@ -454,7 +456,7 @@ class FlashAttention(torch.autograd.Function):
           grad_k, partition_spec, full_shape, mesh=mesh).global_tensor
       grad_v = xs.disable_manual_sharding(
           grad_v, partition_spec, full_shape, mesh=mesh).global_tensor
-
+    # print(grad_v)
     return grad_q, grad_k, grad_v, None, None, None, None, grad_ab, None, None
 
 
