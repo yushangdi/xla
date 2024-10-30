@@ -65,12 +65,8 @@ def _is_on_tpu():
   return 'XRT_TPU_CONFIG' in os.environ or xr.device_type() == 'TPU'
 
 
-def _is_on_eager_debug_mode():
-  return xu.getenv_as('XLA_USE_EAGER_DEBUG_MODE', bool, defval=False)
-
-
 skipOnTpu = unittest.skipIf(_is_on_tpu(), 'Not supported on TPU')
-skipOnEagerDebug = unittest.skipIf(_is_on_eager_debug_mode(),
+skipOnEagerDebug = unittest.skipIf(torch_xla.experimental.is_eager_mode(),
                                    'skip on eager debug mode')
 
 
@@ -604,7 +600,7 @@ class TestAtenXlaTensor(test_utils.XlaTestCase):
     self.assertEqual(x.device.type, 'xla')
 
   def test_randperm(self):
-    x = torch.randperm(3, device=xm.xla_device())
+    x = torch.randperm(3, device=xm.xla_device(), dtype=torch.int32)
     self.assertEqual(x.device.type, 'xla')
 
   def test_randn_like(self):
@@ -1009,6 +1005,19 @@ class TestAtenXlaTensor(test_utils.XlaTestCase):
     a = torch.zeros(4)
     b = torch.ones([2, 2])
     self.runAtenTest((a, b), func)
+
+  def test_multi_view(self):
+
+    def func(x):
+      a1, b1 = x.chunk(2)
+      a2, b2 = x[0:1], x[1:2]
+      a3, b3 = x[0].unsqueeze(0), x[1].unsqueeze(0)
+      a4, b4 = x[0, None], x[1, None]
+      return a1.squeeze(), b1.squeeze(), a2.squeeze(), b2.squeeze(), a3.squeeze(
+      ), b3.squeeze(), a4.squeeze(), b4.squeeze()
+
+    x = torch.randn(size=[2])
+    self.runAtenTest(x, func)
 
   # TODO - upstream behavior has changed and results in expected DestroyXlaTensor
   # counter as of 11/13/2023. Re-enable after reviewing the change.
@@ -1663,9 +1672,7 @@ class TestAtenXlaTensor(test_utils.XlaTestCase):
         t += torch.tensor(i, dtype=torch.float, device=t.device)
       return t
 
-    # This test is for PjRT only
-    if xr.using_pjrt():
-      self.runAtenTest([torch.tensor(20.0)], test_fn)
+    self.runAtenTest([torch.tensor(20.0)], test_fn)
 
   def test_view_and_copy_(self):
     xla_device = xm.xla_device()
@@ -1690,10 +1697,8 @@ class TestAtenXlaTensor(test_utils.XlaTestCase):
     y = torch.rand(5)
     self.assertEqual(x + y, y + x)
 
-  @unittest.skipIf(
-      os.environ.get('XLA_USE_EAGER_DEBUG_MODE'),
-      'Since in eager mode the tensor would be materialized and hence _get_xla_tensors_text would not show the prim::Constant node.'
-  )
+  # Since in eager mode the tensor would be materialized and hence _get_xla_tensors_text would not show the prim::Constant node.
+  @skipOnEagerDebug
   def test_pow_constant(self):
     t1 = torch.pow(torch.tensor([2.0, 3.0], device=xm.xla_device()), 5)
     hlo_text = torch_xla._XLAC._get_xla_tensors_text([t1])
@@ -2293,6 +2298,26 @@ class TestAtenXlaTensor(test_utils.XlaTestCase):
         self.assertEqual(actual_out, expected_out)
         self.assertEqual(actual_grad, expected_grad)
 
+  def test_amp_norm_append_dtype(self):
+    # Tests whether the returned tensor is actually of the specified dtype.
+    #
+    # The operation norm.ScalarOpt_dim_dtype is actually called when using AMPl. It
+    # is redirected from norm.ScalarOpt_dim by appending kFloat data-type as its last
+    # argument.
+
+    def foo(x: torch.Tensor) -> torch.Tensor:
+      return torch.ops.aten.norm.ScalarOpt_dim_dtype(
+          x, p=2, dim=1, keepdim=True, dtype=torch.float32)
+
+    input = torch.rand((10, 10), dtype=torch.float16)
+    out = foo(input)
+
+    in_xla = input.to(xm.xla_device())
+    out_xla = foo(in_xla)
+
+    self.assertEqual(out.dtype, out_xla.dtype)
+    self.assertEqual(out.cpu(), out_xla.cpu(), prec=1e-4)
+
 
 class MNISTComparator(nn.Module):
 
@@ -2360,16 +2385,13 @@ class TestWaitDeviceOps(test_utils.XlaTestCase):
     xm.mark_step()
     xm.wait_device_ops()
     self.assertTrue("ExecuteTime" in met.metric_names() or
-                    "ExecuteChainedTime" in met.metric_names())
+                    "EagerOpExecuteTime" in met.metric_names())
 
 
 class TestDebuggingUtil(test_utils.XlaTestCase):
 
+  @skipOnEagerDebug
   def test_get_xla_tensor_debug_info(self):
-    if xu.getenv_as('XLA_USE_EAGER_DEBUG_MODE', str, '1'):
-      # ignore this test for eager debug mode since it will
-      # mess up the IR.
-      return
     device = xm.xla_device()
     # test non xla tensor
     cpu_t1 = torch.randn(5)
@@ -2553,15 +2575,16 @@ class RegisterXLAKeyTest(test_utils.XlaTestCase):
     self.assertEqual(met.counter_value("RegisterXLAFunctions"), 1)
 
 
-# Only fails in CI https://github.com/pytorch/xla/pull/5431
-@unittest.skip
+@unittest.skipIf(
+    os.environ.get('XLA_USE_EAGER_DEBUG_MODE'),
+    "Skipping test under XLA_USE_EAGER_DEBUG_MODE because `result` will not \
+      reference a graph due to eager evaluation.")
 class TestLoweringContext(test_utils.XlaTestCase):
 
   def test_api(self):
     device = xm.xla_device()
-    a = torch.rand(10, device=device)
-    b = torch.rand(10, device=device)
-    xm.mark_step()
+    a = torch.tensor([1.0, 2.0, 3.0], device=device)
+    b = torch.tensor([4.0, 5.0, 6.0], device=device)
 
     result = a + b
 
@@ -2702,6 +2725,8 @@ class TestGeneric(test_utils.XlaTestCase):
     self.assertEqual(xdata.batch_sizes.device, torch.device('cpu'))
     self.assertEqual(xdata.data.device, xla_device)
 
+  @skipIfFunctionalizationDisabled(
+      "https://github.com/pytorch/xla/pull/7864#issuecomment-2294034008")
   def test_as_strided_input_larger(self):
     size = (5, 5)
     device = xm.xla_device()
@@ -3113,8 +3138,7 @@ class TestHelperFunction(test_utils.XlaTestCase):
 if __name__ == '__main__':
   torch.set_default_dtype(torch.float32)
   torch.manual_seed(42)
-  torch_xla._XLAC._xla_set_use_full_mat_mul_precision(
-      use_full_mat_mul_precision=True)
+  torch_xla._XLAC._xla_set_mat_mul_precision('highest')
   test = unittest.main(verbosity=FLAGS.verbosity, exit=False)
   if xu.getenv_as('METRICS_DEBUG', bool, defval=False):
     print(met.metrics_report())

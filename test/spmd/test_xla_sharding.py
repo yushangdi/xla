@@ -17,6 +17,7 @@ import torch_xla.core.xla_model as xm
 import torch_xla.debug.metrics as met
 import torch_xla.distributed.spmd as xs
 from torch_xla.distributed.spmd import XLAShardedTensor
+import torch_xla.distributed.parallel_loader as pl
 import test_xla_sharding_base
 
 import torch_xla.core.xla_env_vars as xenv
@@ -1272,7 +1273,7 @@ class BasicXlaShardingTest(test_xla_sharding_base.XlaShardingTest):
         f"all-reduce(f32[8,8]{{1,0}} %custom-call.2), channel_id=1, replica_groups={{{{{','.join([str(x) for x in self.device_ids])}}}}}, use_global_device_ids=true, to_apply=%AddComputation.3",
         hlo)
 
-    expected_x = torch.ones(8, 8) * 4
+    expected_x = torch.ones(8, 8) * self.n_devices
     self.assertTrue(torch.allclose(x.cpu(), expected_x))
 
   @unittest.skipIf(xr.device_type() != 'TPU' or tpu.version() < 4,
@@ -1280,10 +1281,11 @@ class BasicXlaShardingTest(test_xla_sharding_base.XlaShardingTest):
   def test_spmd_all_reduce_scale(self):
     xs.set_global_mesh(self._get_mesh((1, self.n_devices)))
     x = torch.ones(8, 8).to(xm.xla_device())
+    scale = 0.25
 
     # all reduce
     x = xs.enable_manual_sharding(x, (None, None)).global_tensor
-    x = torch_xla._XLAC._xla_spmd_all_reduce(xm.REDUCE_SUM, x, 0.25,
+    x = torch_xla._XLAC._xla_spmd_all_reduce(xm.REDUCE_SUM, x, scale,
                                              [self.device_ids])
     x = xs.disable_manual_sharding(x, (None, None), x.shape).global_tensor
 
@@ -1292,7 +1294,7 @@ class BasicXlaShardingTest(test_xla_sharding_base.XlaShardingTest):
         f"all-reduce(f32[8,8]{{1,0}} %custom-call.2), channel_id=1, replica_groups={{{{{','.join([str(x) for x in self.device_ids])}}}}}, use_global_device_ids=true, to_apply=%AddComputation.3",
         hlo)
 
-    expected_x = torch.ones(8, 8)
+    expected_x = torch.ones(8, 8) * int(self.n_devices * scale)
     self.assertTrue(torch.allclose(x.cpu(), expected_x))
 
   def test_get_1d_mesh(self):
@@ -1308,6 +1310,72 @@ class BasicXlaShardingTest(test_xla_sharding_base.XlaShardingTest):
     mesh_without_name = xs.get_1d_mesh()
     self.assertEqual(mesh_without_name.mesh_shape,
                      (xr.global_runtime_device_count(),))
+
+  @unittest.skipUnless(xr.global_runtime_device_count() > 1,
+                       "Multiple devices required for dataloader sharding test")
+  def test_data_loader_with_sharding(self):
+    device = torch_xla.device()
+    mesh = xs.get_1d_mesh("data")
+    batch_size = 8
+    train_loader = xu.SampleGenerator(
+        data=(torch.zeros(batch_size, 3, 64,
+                          64), torch.zeros(batch_size, dtype=torch.int64)),
+        sample_count=100)
+    train_device_loader = pl.MpDeviceLoader(
+        train_loader,
+        device,
+        # Shard the input's batch dimension along the `data` axis, no sharding along other dimensions
+        input_sharding=xs.ShardingSpec(mesh, ('data', None, None, None)))
+    data, _ = iter(train_device_loader).__next__()
+    self.assertEqual(data.size(), torch.Size([8, 3, 64, 64]))
+    self.assertEqual(
+        torch_xla._XLAC._get_xla_sharding_spec(data),
+        f"{{devices=[{mesh.size()},1,1,1]{','.join([str(i) for i in range(mesh.size())])}}}"
+    )
+
+  @unittest.skipUnless(xr.global_runtime_device_count() > 1,
+                       "Multiple devices required for dataloader sharding test")
+  def test_data_loader_with_non_batch_size(self):
+    device = torch_xla.device()
+    mesh = xs.get_1d_mesh("data")
+    batch_size = mesh.size() - 1
+    train_loader = xu.SampleGenerator(
+        data=(torch.zeros(batch_size, 3, 64,
+                          64), torch.zeros(batch_size, dtype=torch.int64)),
+        sample_count=100)
+    train_device_loader = pl.MpDeviceLoader(
+        train_loader,
+        device,
+        # Shard the input's batch dimension along the `data` axis, no sharding along other dimensions
+        input_sharding=xs.ShardingSpec(mesh, ('data', None, None, None)))
+    data, _ = iter(train_device_loader).__next__()
+    self.assertEqual(data.size(), torch.Size([mesh.size() - 1, 3, 64, 64]))
+    self.assertEqual(
+        torch_xla._XLAC._get_xla_sharding_spec(data),
+        f"{{devices=[{mesh.size()},1,1,1]{','.join([str(i) for i in range(mesh.size())])}}}"
+    )
+
+  @unittest.skipUnless(xr.global_runtime_device_count() > 1,
+                       "Multiple devices required for dataloader sharding test")
+  def test_data_loader_with_non_batch_size_and_mini_batch(self):
+    device = torch_xla.device()
+    mesh = xs.get_1d_mesh("data")
+    batch_size = mesh.size() - 1
+    train_loader = xu.SampleGenerator(
+        data=(torch.zeros(batch_size, 3, 64,
+                          64), torch.zeros(batch_size, dtype=torch.int64)),
+        sample_count=100)
+    train_device_loader = pl.MpDeviceLoader(
+        train_loader,
+        device,
+        # Shard the input's batch dimension along the `data` axis, no sharding along other dimensions
+        input_sharding=xs.ShardingSpec(
+            mesh, ('data', None, None, None), minibatch=True))
+    with self.assertRaisesRegex(
+        RuntimeError,
+        "When minibatch is configured, batch dimension of the tensor must be divisible by local runtime device count*"
+    ):
+      data, _ = iter(train_device_loader).__next__()
 
 
 if __name__ == '__main__':

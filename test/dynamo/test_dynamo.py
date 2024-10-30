@@ -27,10 +27,15 @@ import test_utils
 
 
 def _is_on_tpu():
-  return 'XRT_TPU_CONFIG' in os.environ or xr.device_type() == 'TPU'
+  return xr.device_type() == 'TPU'
+
+
+def _is_on_neuron():
+  return xr.device_type() == 'NEURON'
 
 
 skipOnTpu = unittest.skipIf(_is_on_tpu(), 'Not supported on TPU')
+skipOnNeuron = unittest.skipIf(_is_on_neuron(), 'Not supported on NEURON')
 
 
 class DynamoInPlaceTest(unittest.TestCase):
@@ -54,12 +59,18 @@ class DynamRandomOpTest(unittest.TestCase):
     return torch.randn(5, 5, device=a.device) + a
 
   def test_random_op_different_result_each_run(self):
+    xm.wait_device_ops()
+    met.clear_all()
     dynamo_random_op = torch.compile(
         self.random_op, backend="openxla", fullgraph=True)
     t = torch.randn(5, 5).to(xm.xla_device())
     dynamo_res_1 = dynamo_random_op(t)
     dynamo_res_2 = dynamo_random_op(t)
     dynamo_res_3 = dynamo_random_op(t)
+    # retriving/updating rng seed in the breidge should not cause transferToServer
+    self.assertNotIn("TransferFromDeviceTime", met.metric_names())
+    # updating rng seed will result in transferToServer
+    self.assertIn("TransferToDeviceTime", met.metric_names())
     self.assertFalse(torch.allclose(dynamo_res_1, dynamo_res_2))
     self.assertFalse(torch.allclose(dynamo_res_2, dynamo_res_3))
 
@@ -92,6 +103,19 @@ class DynamoLTCInteractionTest(unittest.TestCase):
       xm.mark_step()
       xm.wait_device_ops()
       self.assertEqual(current_execute_time, met.metric_data('ExecuteTime')[0])
+
+  def test_copy_op(self):
+
+    def copy_a_to_b(a):
+      res = a.cos()
+      copy = torch.ops.aten.copy.default(a, res)
+      return copy
+
+    device = torch_xla.device()
+    compiled_copy = torch.compile(copy_a_to_b, backend="openxla")
+    a = torch.randn(2, 9).to(device)
+    res = compiled_copy(a)
+    self.assertTrue(torch.allclose(res, a))
 
 
 class DynamoProfilerTest(unittest.TestCase):
@@ -133,6 +157,7 @@ class DynamoInferenceBasicTest(parameterized.TestCase):
     })
     return "cuda:0"
 
+  @skipOnNeuron
   def test_simple_model(self):
     device = xm.xla_device()
     x = torch.tensor(100.0)
@@ -333,8 +358,8 @@ class DynamoInferenceBasicTest(parameterized.TestCase):
             rtol=1e-05,
             atol=1e-05))
 
-  def get_loader(self, device, sample_count):
-    batch_size = xu.getenv_as('BATCH_SIZE', int, defval=4)
+  def get_loader(self, device, sample_count, batch_size=4):
+    batch_size = xu.getenv_as('BATCH_SIZE', int, defval=batch_size)
     loader = xu.SampleGenerator(
         data=(torch.randn(batch_size, 3, 224, 224, device=device),
               torch.zeros(batch_size, dtype=torch.int64, device=device)),
@@ -342,6 +367,7 @@ class DynamoInferenceBasicTest(parameterized.TestCase):
     return loader
 
   @skipOnTpu
+  @skipOnNeuron
   @parameterized.parameters(
       True,
       False,
@@ -349,7 +375,7 @@ class DynamoInferenceBasicTest(parameterized.TestCase):
   def test_resnet18(self, initialize_on_cuda):
     device = self._choose_proper_device(initialize_on_cuda)
     sample_count = xu.getenv_as('SAMPLE_COUNT', int, defval=10)
-    loader = self.get_loader(device, sample_count)
+    loader = self.get_loader(device, sample_count, batch_size=4)
     resnet18 = torchvision.models.resnet18()
     resnet18.eval()
     device_resnet18 = torchvision.models.resnet18()
@@ -360,8 +386,8 @@ class DynamoInferenceBasicTest(parameterized.TestCase):
     xm.mark_step()
     xm.wait_device_ops()
     met.clear_all()
+    dynamo_resnet18 = torch.compile(device_resnet18, backend='openxla')
     for data, _ in loader:
-      dynamo_resnet18 = torch.compile(device_resnet18, backend='openxla')
       output = dynamo_resnet18(data)
       output_cpu = resnet18(data.cpu())
       self.assertTrue(
@@ -374,6 +400,7 @@ class DynamoInferenceBasicTest(parameterized.TestCase):
     self.assertEqual(
         met.metric_data('RunCachedGraphOutputData')[0], sample_count)
 
+  @skipOnNeuron
   def test_resnet18_lazy_vs_dynamo(self):
     sample_count = xu.getenv_as('SAMPLE_COUNT', int, defval=10)
     device = torch_xla.device()
@@ -536,6 +563,7 @@ class DynamoTrainingBasicTest(unittest.TestCase):
             input.grad, xla_input.grad.cpu(), rtol=1e-05, atol=1e-04))
 
   @skipOnTpu
+  @skipOnNeuron
   def test_resnet18(self):
     torch._dynamo.reset()
     met.clear_counters()

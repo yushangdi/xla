@@ -19,6 +19,7 @@
 #include "xla/python/ifrt/hlo/hlo_program.h"
 #include "xla/python/pjrt_ifrt/pjrt_array.h"
 #include "xla/python/pjrt_ifrt/pjrt_client.h"
+#include "xla/python/pjrt_ifrt/pjrt_dtype.h"
 #include "xla/python/pjrt_ifrt/xla_compiler.h"
 #include "xla/shape.h"
 
@@ -117,7 +118,7 @@ class IfrtComputationClient : public ComputationClient {
 
   std::shared_ptr<std::vector<std::string>> GetReplicationDevices() override;
 
-  void WaitDeviceOps(absl::Span<const std::string> devices) override;
+  void WaitDeviceOps(absl::Span<const std::string> devices = {}) override;
 
   std::map<std::string, Metric> GetMetrics() const override;
 
@@ -147,6 +148,16 @@ class IfrtComputationClient : public ComputationClient {
 
   ComputationPtr DeserializeComputation(
       const std::string& serialized) override {
+    XLA_ERROR() << __FUNCTION__ << " not implemented";
+  }
+
+  void RegisterCustomCall(const std::string& fn_name, void* function_ptr,
+                          const std::string& platform) override {
+    XLA_ERROR() << __FUNCTION__ << " not implemented";
+  };
+
+  void OnReadyCallback(DataPtr data,
+                       const std::function<void()>& callback) override {
     XLA_ERROR() << __FUNCTION__ << " not implemented";
   }
 
@@ -213,7 +224,7 @@ class IfrtComputationClient : public ComputationClient {
         ss << "  Data Shape: " << shape().ToString() << "\n";
         ss << "  OpSharding: "
            << xla::HloSharding::FromProto(*sharding_)->ToString() << "\n";
-        ss << "  NumShards: " << buffer->sharding().devices().size() << "\n";
+        ss << "  NumShards: " << buffer->sharding().devices()->size() << "\n";
       } else {
         ss << "XLAData: \n";
         ss << "  Data Device: " << device() << "\n";

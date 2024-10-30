@@ -10,6 +10,7 @@ class TestTorchFunctions(parameterized.TestCase):
 
   def setUp(self):
     self.env = torch_xla2.tensor.Environment()
+    torch_xla2.enable_accuracy_mode()
 
   @parameterized.named_parameters(
       ('tensor_2d', lambda: torch.tensor([[0.1, 1.2], [2.2, 3.1], [4.9, 5.2]])),
@@ -33,6 +34,19 @@ class TestTorchFunctions(parameterized.TestCase):
     with self.env:
       t2 = self.env.to_xla(t)
       # assert no exceptions
+
+  def test_brackets(self):
+    with self.env:
+      a = torch.randn((2,3))
+      a[1] = 9
+      self.assertEqual(a[1, 0].item(), 9)
+
+  def test_bernoulli_inplace(self):
+    with self.env:
+      a = torch.randn((2,3))
+      a.bernoulli_(0.4)
+
+
 
 
 if __name__ == '__main__':

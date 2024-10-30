@@ -111,9 +111,9 @@ PyTorch/XLA makes it easy to accelerate training by running on multiple XLA
 devices. The following snippet shows how:
 
 ```python
+import torch_xla
 import torch_xla.core.xla_model as xm
 import torch_xla.distributed.parallel_loader as pl
-import torch_xla.distributed.xla_multiprocessing as xmp
 
 def _mp_fn(index):
   device = xm.xla_device()
@@ -131,15 +131,15 @@ def _mp_fn(index):
     xm.optimizer_step(optimizer)
 
 if __name__ == '__main__':
-  xmp.spawn(_mp_fn, args=())
+  torch_xla.launch(_mp_fn, args=())
 ```
 
 There are three differences between this multi-device snippet and the previous
 single device snippet. Let's go over then one by one.
 
-- `xmp.spawn()`
+- `torch_xla.launch()`
   - Creates the processes that each run an XLA device.
-  - Each process will only be able to access the device assigned to the current process. For example on a TPU v4-8, there will be 4 processes being spawn up and each process will own a TPU device.
+  - This function is a wrapper of multithreading spawn to allow user run the script with torchrun command line also. Each process will only be able to access the device assigned to the current process. For example on a TPU v4-8, there will be 4 processes being spawn up and each process will own a TPU device.
   - Note that if you print the `xm.xla_device()` on each process you will see `xla:0` on all devices. This is because each process can only see one device. This does not mean multi-process is not functioning. The only execution is with PJRT runtime on TPU v2 and TPU v3 since there will be `#devices/2` processes and each process will have 2 threads(check this [doc](https://github.com/pytorch/xla/blob/master/docs/pjrt.md#tpus-v2v3-vs-v4) for more details).
 - `MpDeviceLoader`
   - Loads the training data onto each device.
@@ -153,7 +153,7 @@ The model definition, optimizer definition and training loop remain the same.
 
 > **NOTE:** It is important to note that, when using multi-processing, the user can start
 retrieving and accessing XLA devices only from within the target function of
-`xmp.spawn()` (or any function which has `xmp.spawn()` as parent in the call
+`torch_xla.launch()` (or any function which has `torch_xla.launch()` as parent in the call
 stack).
 
 See the
@@ -315,6 +315,20 @@ This will initialize a persistent compilation cache at the specified path. The
 `readonly` parameter can be used to control whether the worker will be able to
 write to the cache, which can be useful when a shared cache mount is used for
 an SPMD workload.
+
+If you want to use  persistent compilation cache in the multi process training(with `torch_xla.launch` or `xmp.spawn`), you should use the different path for different process.
+
+```python
+def _mp_fn(index):
+  # cache init needs to happens inside the mp_fn.
+  xr.initialize_cache(f'/tmp/xla_cache_{index}', readonly=False)
+  ....
+
+if __name__ == '__main__':
+  torch_xla.launch(_mp_fn, args=())
+```
+If you don't have the access to the `index`, you can use `xr.global_ordinal()`. Check out the runnable example in [here](https://github.com/pytorch/xla/blob/master/examples/data_parallel/train_resnet_xla_ddp.py).
+
 
 ## Further Reading
 

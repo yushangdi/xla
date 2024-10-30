@@ -67,6 +67,13 @@ def _setup_libtpu_flags():
   flags = _set_missing_flags(
       flags, (('xla_tpu_prefer_async_allgather_to_allreduce', 'true'),))
 
+  # This flag enables FlashAttention HLO pass that pattern matches attention
+  # and rewrites it as flash attention. This pattern matching is causing
+  # issues for our standard dot product attention. Turning it off till
+  # we fix the issue with pattern matching.
+  flags = _set_missing_flags(flags,
+                             (('xla_tpu_enable_flash_attention', 'false'),))
+
   if tpu.version() == 5:
     default_v5_flags = {
         # TODO(jonbolin): Tune these flags for async collective fusion - v5
@@ -116,11 +123,28 @@ def _summarize_fn_tracker():
 
 def _aws_ec2_inf_trn_init():
   try:
+    from libneuronxla.libneuronpjrt_path import libneuronpjrt_path
+  except ImportError:
+    # Did not find libneuronxla
+    return False
+
+  # Need to set NEURON_LIBRARY_PATH here for proper Neuron Cache behavior
+  os.environ.setdefault('NEURON_LIBRARY_PATH', libneuronpjrt_path())
+  # Enable addition features and overrides
+  try:
     from torch_neuronx import xla
   except ImportError:
-    return
+    # Basic initializations if torch-neuronx is not available
+    from ._internal import neuron
+    if os.path.basename(sys.argv[0]) != 'neuron_parallel_compile':
+      import libneuronxla
+      libneuronxla.configure_environment()
+      neuron.set_envvar_defaults()
+      neuron.configure_pjrt_environment()
   else:
     xla.init()
+  # Found libneuronxla
+  return True
 
 
 def _setup_tpu_vm_library_path() -> bool:
@@ -155,8 +179,7 @@ def _setup_tpu_vm_library_path() -> bool:
 
 def _check_deprecated_env_var():
   deprecated_env_vars = [
-      'XLA_USE_BF16', 'XLA_USE_FP16', 'XLA_DOWNCAST_BF16', 'XLA_DOWNCAST_FP16',
-      'XLA_USE_32BIT_LONG'
+      'XLA_USE_FP16', 'XLA_DOWNCAST_FP16', 'XLA_USE_32BIT_LONG'
   ]
   for env_var in deprecated_env_vars:
     if os.environ.get(env_var):
@@ -180,7 +203,7 @@ from ._patched_functions import _apply_patches
 _found_libtpu = _setup_tpu_vm_library_path()
 
 # Setup Neuron library for AWS EC2 inf/trn instances.
-_aws_ec2_inf_trn_init()
+_found_libneuronxla = _aws_ec2_inf_trn_init()
 
 
 def _prepare_to_exit():
@@ -243,7 +266,14 @@ if os.getenv('XLA_REGISTER_INSTALLED_PLUGINS',
   plugins.use_dynamic_plugins()
   plugins.register_installed_plugins()
 
+if os.getenv('XLA_USE_EAGER_DEBUG_MODE', '0') == '1':
+  from .experimental import eager_mode
+  eager_mode(True)
+
 from .torch_xla import *
 
 # register all custom kenels and decomp by default
-from .core import custom_kernel, decomp_registration
+from ._internal import custom_kernel, decomp_registration, c10d_registration
+
+# select default PJRT_DEVICE before any execution
+runtime._maybe_select_default_device()

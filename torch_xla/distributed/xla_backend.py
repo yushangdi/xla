@@ -46,6 +46,16 @@ class ProcessGroupXla(ProcessGroup):
   def getBackendName(self):
     return 'xla'
 
+  # pytorch's process group is unable to retrive the group size from python level. It should
+  # already been support in C++ level: https://github.com/pytorch/pytorch/blob/7b1988f9222f3dec5cc2012afce84218199748ae/torch/csrc/distributed/c10d/ProcessGroup.cpp#L148-L152
+  # For now we manually set the group name property as a temporary solution.
+  def _set_group_name(self, name: str) -> None:
+    self._group_name = name
+
+  @property
+  def group_name(self):
+    return self._group_name
+
   def _get_reduce_type(self, reduce_op):
     if reduce_op == dist.ReduceOp.SUM:
       return xm.REDUCE_SUM
@@ -70,6 +80,10 @@ class ProcessGroupXla(ProcessGroup):
     # TODO(hjm-aws): implement all_reduce_options.timeout.
     xm.all_reduce(reduce_type, tensors, groups=self._mesh, pin_layout=False)
     return _ret_work(tensors)
+
+  # method for dist.all_gather_into_tensor under eager mode.
+  def _allgather_base(self, output_tensor, input_tensor, opts):
+    return self.allgather(output_tensor, input_tensor, opts)
 
   def allgather(self, output_tensors_list, input_tensors, opts=None):
     for input_tensor, output_tensors in zip(input_tensors, output_tensors_list):
@@ -156,6 +170,34 @@ class ProcessGroupXla(ProcessGroup):
 
     return _ret_work(output_tensors)
 
+  # call site https://github.com/pytorch/pytorch/blob/758d78790164bfb041555daed380de96e06f78a3/torch/distributed/distributed_c10d.py#L3856
+  def _reduce_scatter_base(self, output_tensor, input_tensor, opts):
+    """
+    Reduces, then scatters a flattened tensor to all processes in a group.
+
+    Args:
+        output (Tensor): Output tensor.
+        input (Tensor): Input tensor that is of size output tensor size times world size
+        opts: distributed reduce op (ReduceOp).
+
+    Returns:
+        Async work handle, if async_op is set to True.
+        None, if not async_op or if not part of the group.
+    """
+    reduce_type = self._get_reduce_type(opts.reduceOp)
+    groups = self._mesh
+    shard_count = len(groups[0]) if groups else self.size()
+    xm.reduce_scatter(
+        reduce_type,
+        input_tensor,
+        scatter_dim=0,
+        shard_count=shard_count,
+        scale=1.0,
+        groups=groups,
+        output=output_tensor,
+        pin_layout=False)
+    return _ret_work(output_tensor)
+
   # Call site:
   # https://github.com/pytorch/pytorch/blob/70f57bcb1e45d21532bdb1c44d3aab018d1cbe88/torch/distributed/distributed_c10d.py#L2683
   def barrier(self, opts):
@@ -173,8 +215,19 @@ class ProcessGroupXla(ProcessGroup):
   def alltoall(self, *args):
     raise NotImplementedError
 
-  def alltoall_base(self, *args):
-    raise NotImplementedError
+  # handle the nondynamo path when call torch.distributed.all_to_all_single
+  # call from https://github.com/pytorch/pytorch/blob/758d78790164bfb041555daed380de96e06f78a3/torch/distributed/distributed_c10d.py#L3996
+  # Note for pytorch, the split/concat dimension is always 0, while for XLA alltoall,
+  # we can't specify different split sizes.
+  def alltoall_base(self, output, input, output_split_sizes, input_split_sizes,
+                    opts):
+    assert (output_split_sizes is None or len(output_split_sizes) == 0) and \
+           (input_split_sizes is None or len(input_split_sizes) == 0), \
+           "XLA doesn't support specifying non-empty output_split_sizes and input_split_sizes"
+    split_count = xr.world_size()
+    result = xm.all_to_all(input, 0, 0, split_count, pin_layout=False)
+    output.copy_(result)
+    return _ret_work(output)
 
   def gather(self, *args):
     raise NotImplementedError

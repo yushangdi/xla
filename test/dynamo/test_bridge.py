@@ -7,7 +7,7 @@ import torch._dynamo.testing
 from functorch.compile import aot_module_simplified, make_boxed_compiler
 from torch._dynamo import disable
 
-import torch_xla.core.dynamo_bridge as bridge
+import torch_xla._dynamo.dynamo_bridge as bridge
 import torch_xla.core.xla_model as xm
 import torch_xla.debug.metrics as metrics
 from torch import fx, nn
@@ -247,7 +247,7 @@ class TorchXLAReuseGraphTest(torch._dynamo.test_case.TestCase):
       return module(x)
 
     x = torch.randint(0, 10, (10,), device=device)
-    self._compile_and_check(foo, (x,), backend="openxla_eval")
+    self._compile_and_check(foo, (x,), backend="openxla")
 
   def test_inputs_not_computed(self):
 

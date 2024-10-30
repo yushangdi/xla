@@ -11,6 +11,7 @@
 #include "torch_xla/csrc/helpers.h"
 #include "torch_xla/csrc/layout_manager.h"
 #include "torch_xla/csrc/runtime/debug_macros.h"
+#include "torch_xla/csrc/runtime/runtime.h"
 #include "torch_xla/csrc/runtime/util.h"
 #include "torch_xla/csrc/shape_helper.h"
 #include "torch_xla/csrc/tensor_methods.h"
@@ -254,6 +255,22 @@ AllGatherResult BuildAllGather(xla::XlaOp input, xla::XlaOp token, int64_t dim,
   return {all_gather_result, token_handler.GetNewToken(all_gather_result)};
 }
 
+// function signature should match torch/csrc/distributed/c10d/Functional.cpp
+at::Tensor all_gather_into_tensor(const at::Tensor& self, int64_t group_size,
+                                  std::string group_name) {
+  TORCH_LAZY_FN_COUNTER("xla::");
+  auto self_tensor = bridge::GetXlaTensor(self);
+  std::vector<int64_t> all_groups(group_size);
+  std::iota(all_groups.begin(), all_groups.end(), 0);
+  auto result = tensor_methods::all_gather(self_tensor, 0, group_size,
+                                           {all_groups}, true);
+  return bridge::AtenFromXlaTensor(result);
+}
+
+TORCH_LIBRARY_IMPL(_c10d_functional, XLA, m) {
+  m.impl("all_gather_into_tensor", all_gather_into_tensor);
+}
+
 AllGatherResultCoalesced BuildAllGatherCoalesced(
     absl::Span<const xla::XlaOp> inputs, xla::XlaOp token, int64_t dim,
     int64_t shard_count, const std::vector<std::vector<int64_t>>& groups,
@@ -291,6 +308,44 @@ AllGatherResultCoalesced BuildAllGatherCoalesced(
     }
   }
   return {result, token_handler.GetNewToken(result[0])};
+}
+
+at::Tensor all_to_all_single(const at::Tensor& input,
+                             std::vector<int64_t> output_split_sizes,
+                             std::vector<int64_t> input_split_sizes,
+                             std::string group_name) {
+  // this basically is the code copy from
+  // init_python_bindings.cpp:_xla_all_to_all
+  TORCH_LAZY_FN_COUNTER("xla::");
+  if (output_split_sizes.size() != 0 && input_split_sizes.size() != 0) {
+    for (size_t i = 0; i < input_split_sizes.size(); i++) {
+      if (input_split_sizes[i] != 1)
+        throw std::runtime_error(
+            "torch_xla does not support arbitrary split sizes for all_to_all");
+    }
+  }
+  bool pin_layout = false;
+  const torch::lazy::Value& token =
+      GetAllReduceToken(bridge::GetCurrentDevice());
+  int64_t split_count = runtime::GetComputationClient()->GetAllDevices().size();
+  std::vector<int64_t> all_groups(split_count);
+  std::iota(all_groups.begin(), all_groups.end(), 0);
+  XLATensorPtr result_ptr;
+  torch::lazy::Value new_token;
+  std::tie(result_ptr, new_token) =
+      tensor_methods::all_to_all(bridge::GetXlaTensor(input), token, 0, 0,
+                                 split_count, {all_groups}, pin_layout);
+  at::Tensor result = bridge::AtenFromXlaTensor(std::move(result_ptr));
+
+  at::Tensor result_with_grad = torch::autograd::make_variable(
+      result, /*requires_grad=*/input.requires_grad());
+  SetAllReduceToken(bridge::GetCurrentDevice(),
+                    std::make_shared<torch::lazy::Value>(new_token));
+  return result_with_grad;
+}
+
+TORCH_LIBRARY_IMPL(_c10d_functional, XLA, m) {
+  m.impl("all_to_all_single", all_to_all_single);
 }
 
 CollectivePermuteResult BuildCollectivePermute(
@@ -388,6 +443,46 @@ xla::XlaOp BuildReduceScatter(AllReduceType reduce_type, xla::XlaOp input,
     reduce_result = reduce_result * scaling_value;
   }
   return reduce_result;
+}
+
+// wrapper of BuildReduceScatter to adapt upstream dist.reduce_scatter_tensor()
+// This path is only for dynamo called from
+// https://github.com/pytorch/pytorch/blob/85fa01969719dab91eac3e02dd193c7d20d0e87f/torch/distributed/_functional_collectives.py#L1039
+// Function signature should match with
+// https://github.com/pytorch/pytorch/blob/85fa01969719dab91eac3e02dd193c7d20d0e87f/torch/csrc/distributed/c10d/Functional.cpp#L356
+// to dispatch.
+at::Tensor reduce_scatter_tensor(const at::Tensor& input, std::string reduce_op,
+                                 int64_t group_size, std::string group_name) {
+  TORCH_LAZY_FN_COUNTER("xla::");
+  auto self = bridge::GetXlaTensor(input);
+  std::vector<int64_t> all_groups(group_size);
+  std::iota(all_groups.begin(), all_groups.end(), 0);
+  int64_t shard_count = group_size;
+  AllReduceType all_reduce_type;
+  if (reduce_op == "sum") {
+    all_reduce_type = AllReduceType::kSum;
+  } else if (reduce_op == "min") {
+    all_reduce_type = AllReduceType::kMin;
+  } else if (reduce_op == "max") {
+    all_reduce_type = AllReduceType::kMax;
+  } else if (reduce_op == "mul") {
+    all_reduce_type = AllReduceType::kMul;
+  } else if (reduce_op == "or") {
+    all_reduce_type = AllReduceType::kOr;
+  } else if (reduce_op == "and") {
+    all_reduce_type = AllReduceType::kAnd;
+  } else {
+    throw std::invalid_argument("Invalid string for AllReduceType: " +
+                                reduce_op);
+  }
+  // reduce dim is limited to the first dim due to the fixed function signature.
+  XLATensorPtr output = tensor_methods::reduce_scatter(
+      self, all_reduce_type, 1.0, 0, shard_count, {all_groups});
+  return bridge::AtenFromXlaTensor(output);
+}
+
+TORCH_LIBRARY_IMPL(_c10d_functional, XLA, m) {
+  m.impl("reduce_scatter_tensor", reduce_scatter_tensor);
 }
 
 ReduceScatterResultCoalesced BuildReduceScatterCoalesced(

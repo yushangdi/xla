@@ -8,8 +8,8 @@
 #include "torch_xla/csrc/xla_lower_util.h"
 #include "tsl/platform/stacktrace.h"
 #include "xla/client/lib/constants.h"
-#include "xla/client/lib/loops.h"
 #include "xla/client/lib/slicing.h"
+#include "xla/hlo/builder/lib/loops.h"
 #include "xla/shape_util.h"
 
 namespace torch_xla {
@@ -173,9 +173,9 @@ EmbeddingBag::EmbeddingBag(const torch::lazy::Value& weight,
       include_last_offset_(include_last_offset) {}
 
 torch::lazy::NodePtr EmbeddingBag::Clone(torch::lazy::OpList operands) const {
-  return torch::lazy::MakeNode<EmbeddingBag>(operands.at(0), operands.at(1),
-                                             operands.at(2), mode_,
-                                             operands.at(3), false);
+  return torch_xla::MakeNode<EmbeddingBag>(operands.at(0), operands.at(1),
+                                           operands.at(2), mode_,
+                                           operands.at(3), false);
 }
 
 XlaOpVector EmbeddingBag::Lower(LoweringContext* loctx) const {

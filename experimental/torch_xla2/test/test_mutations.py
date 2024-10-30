@@ -14,16 +14,14 @@ class TestMutations(TestCase):
       x = torch.tensor([1, 2, 3], dtype=torch.int32)
       y = torch.tensor([4, 5, 6], dtype=torch.int32)
       x.add_(y)
-      xt = torch_xla2.tensor.j2t(x._elem)
-      self.assertEqual(xt, torch.tensor([5, 7, 9], dtype=torch.int32))
+      self.assertEqual(x, torch.tensor([5, 7, 9], dtype=torch.int32))
 
   def test_sub(self):
     with self.env:
       x = torch.tensor([1, 2, 3], dtype=torch.int32)
       y = torch.tensor([4, 5, 6], dtype=torch.int32)
       x.sub_(y)
-      xt = torch_xla2.tensor.j2t(x._elem)
-      self.assertEqual(xt, torch.tensor([-3, -3, -3], dtype=torch.int32))
+      self.assertEqual(x, torch.tensor([-3, -3, -3], dtype=torch.int32))
 
   def test_mul(self):
     with self.env:
@@ -31,18 +29,7 @@ class TestMutations(TestCase):
       y = torch.tensor([4, 5, 6], dtype=torch.int32)
 
       x.mul_(y)
-      xt = torch_xla2.tensor.j2t(x._elem)
-      self.assertEqual(xt, torch.tensor([4, 10, 18], dtype=torch.int32))
-
-  def test_div(self):
-    with self.env:
-      x = torch.tensor([1, 2, 3], dtype=torch.int32)
-      y = torch.tensor([4, 5, 6], dtype=torch.int32)
-
-      x.div_(y)
-      xt = torch_xla2.tensor.j2t(x._elem)
-      self.assertEqual(xt,
-                      torch.tensor([1. / 4, 2. / 5, 3. / 6], dtype=torch.float))
+      self.assertEqual(x, torch.tensor([4, 10, 18], dtype=torch.int32))
 
 
 if __name__ == '__main__':

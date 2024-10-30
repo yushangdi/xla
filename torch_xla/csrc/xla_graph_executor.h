@@ -192,6 +192,18 @@ class XLAGraphExecutor : public torch::lazy::LazyGraphExecutor {
 
   bool UseEagerMode() { return use_eager_mode_; }
 
+  void SetAllowExecution(bool allow_execution) {
+    allow_execution_ = allow_execution;
+  }
+
+  bool AllowExecution() { return allow_execution_; }
+
+  void SetCurrentGraphName(std::string graph_name) {
+    current_graph_name_ = graph_name;
+  }
+
+  std::string CurrentGraphName() { return current_graph_name_; }
+
  private:
   // This is just to group results from compile(). Since our computation is
   // different, we don't reuse the upstream CompilationResult.
@@ -367,6 +379,8 @@ class XLAGraphExecutor : public torch::lazy::LazyGraphExecutor {
 
   ComputationCache* computation_cache_;
   bool use_eager_mode_ = false;
+  bool allow_execution_ = true;
+  std::string current_graph_name_ = "";
 };
 
 }  // namespace torch_xla

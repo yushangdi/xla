@@ -32,7 +32,7 @@ ptxla_cc_library(
     name = "tensor",
     srcs = [
         "aten_autograd_ops.cpp",
-        "aten_cpu_fallback.cpp",
+        "aten_fallback.cpp",
         "aten_xla_bridge.cpp",
         "aten_xla_type.cpp",
         "autocast_mode.cpp",
@@ -75,7 +75,7 @@ ptxla_cc_library(
     ] + glob(["ops/*.cpp"]),
     hdrs = [
         "aten_autograd_ops.h",
-        "aten_cpu_fallback.h",
+        "aten_fallback.h",
         "aten_cuda_functions.h",
         "aten_xla_bridge.h",
         "batch_norm.h",
@@ -151,6 +151,7 @@ ptxla_cc_library(
         "@xla//xla/client/lib:slicing",
         "@xla//xla/client/lib:sorting",
         "@xla//xla/client/lib:svd",
+        "@xla//xla/hlo/pass:hlo_pass_pipeline",
         "@xla//xla/stream_executor:dnn",
         "@tsl//tsl/platform:errors",
         "@tsl//tsl/profiler/lib:traceme",
@@ -281,21 +282,19 @@ ptxla_cc_library(
         "@xla//xla/service:hlo_verifier",
         "@xla//xla/service:sharding_propagation",
         "@xla//xla/service/spmd:spmd_partitioner",
-        "@xla//xla/service:custom_call_target_registry",
-        "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
-        "@xla//xla/pjrt/c:pjrt_c_api_wrapper_impl",
-        "@xla//xla/pjrt/c:pjrt_c_api_gpu_extension_hdrs",
     ],
 )
 
 ptxla_cc_library(
     name = "ir",
     srcs = [
+        "dynamic_shape_detector.cpp",
         "ir.cpp",
         "lowering_context.cpp",
         "stack_frame_index_builder.cpp",
     ],
     hdrs = [
+        "dynamic_shape_detector.h",
         "ir.h",
         "lowering_context.h",
         "stack_frame_index_builder.h",

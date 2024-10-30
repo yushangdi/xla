@@ -1,11 +1,11 @@
 import torch
 import torch.nn as nn
+import torch_xla
 from torch_xla.distributed.fsdp import XlaFullyShardedDataParallel
 from torch_xla.distributed.fsdp.wrap import (
     always_wrap_policy as always_wrap,)
 
 import torch.distributed as dist
-import torch_xla.distributed.xla_multiprocessing as xmp
 import torch_xla.core.xla_model as xm
 
 import sys
@@ -143,7 +143,7 @@ class TestFSDPWithMetaDevice():
 def _mp_fn(index):
   device = xm.xla_device()
   # This test fails on GPU with 03/30 TF-pin update (https://github.com/pytorch/xla/pull/4840)
-  if xm.xla_device_hw(device) in ('TPU'):
+  if xm.xla_device_hw(device) in ('TPU', 'NEURON'):
     dist.init_process_group('xla', init_method='xla://')
     test = TestFSDPWithMetaDevice()
     test.test_simple_model_with_meta_device_reset_params()
@@ -157,4 +157,4 @@ def _mp_fn(index):
 
 
 if __name__ == '__main__':
-  xmp.spawn(_mp_fn, args=())
+  torch_xla.launch(_mp_fn, args=())

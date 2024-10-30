@@ -7,18 +7,22 @@ import re
 import threading
 import time
 import warnings
-from typing import List, Optional, TypedDict
+from typing import Any, Callable, Dict, List, Optional, Set, TextIO, Tuple, TypedDict, Union
 import torch
 import torch.distributed._functional_collectives
 from torch.library import Library
 import torch.nn.functional as F
+import torch.optim as optim
 import torch_xla
 from torch_xla import runtime
 import torch_xla.core.xla_env_vars as xenv
 import torch_xla.debug.metrics_saver as ms
 import torch_xla.utils.utils as xu
 import torch_xla.utils.closures as xc
+from torch_xla.distributed.spmd.xla_sharding import ShardingSpec
 import os
+from torch_xla.experimental.deprecation import deprecated
+import torch_xla._internal.utils as _utils
 
 _DEVICES = xu.LazyProperty(lambda: torch_xla._XLAC._xla_get_devices())
 
@@ -32,34 +36,28 @@ REDUCE_MAX = 'max'
 _DEVICE_CONTEXTS = dict()
 _DEVICE_CONTEXTS_LOCK = threading.Lock()
 
-# Note [Dynamo WORLD_SIEZ and ORDINAL]
-# Belows are workaround to cache the ordinal and world_size such that
-# Dynamo won't do graph breaks when xm.xrt_world_size() and xm.get_ordinal() are called.
-_WORLD_SIZE = None
-_ORDINAL = None
-
 XLA_LIB = Library("xla", "DEF")
 
+from . import xla_model as this_module
 
-def _init_world_size_ordinal():
-  global _WORLD_SIZE, _ORDINAL
-
-  # Dynamo doesn't support XRT or multithreaded runtime. See Note [V3-8 Threading]
-  if not runtime.using_pjrt() or runtime.addressable_device_count() > 1:
-    return
-
-  if _WORLD_SIZE is None:
-    _WORLD_SIZE = xrt_world_size()
-    _ORDINAL = get_ordinal()
+xrt_world_size = deprecated(this_module, torch_xla.runtime.world_size,
+                            'xrt_world_size() will be removed in release 2.7.')
+get_ordinal = deprecated(
+    this_module, torch_xla.runtime.global_ordinal,
+    'xla_model.get_ordinal() will be removed in release 2.7.')
+parse_xla_device = deprecated(
+    this_module, _utils.parse_xla_device,
+    'xla_model.parse_xla_device() will be removed in release 2.7.')
 
 
 class DeviceContext(object):
 
-  def __init__(self, device):
+  def __init__(self, device: Union[str, torch.device]):
     self.device = device
 
 
-def _get_device_context(device=None):
+def _get_device_context(
+    device: Optional[Union[str, torch.device]] = None) -> DeviceContext:
   if device is None:
     device = torch_xla._XLAC._xla_get_default_device()
   else:
@@ -72,17 +70,12 @@ def _get_device_context(device=None):
     return devctx
 
 
-def is_xla_tensor(tensor):
+def is_xla_tensor(tensor: torch.Tensor) -> bool:
   return tensor.device.type == 'xla'
 
 
-def parse_xla_device(device):
-  m = re.match(r'([A-Z]+):(\d+)$', device)
-  if m:
-    return (m.group(1), int(m.group(2)))
-
-
-def get_xla_supported_devices(devkind=None, max_devices=None):
+def get_xla_supported_devices(devkind: Optional[str] = None,
+                              max_devices: Optional[int] = None) -> List[str]:
   """Returns a list of supported devices of a given kind.
 
   Args:
@@ -115,53 +108,10 @@ def get_xla_supported_devices(devkind=None, max_devices=None):
     return kind_devices[:max_devices] if max_devices else kind_devices
 
 
-def xrt_world_size(defval=1):
-  """Retrieves the number of devices which is taking part of the replication.
-
-  Args:
-    defval (int, optional): The default value to be returned in case there is no
-      replication information available.
-      Default: 1
-
-  Returns:
-    The number of devices which is taking part of the replication.
-  """
-  global _WORLD_SIZE
-  if _WORLD_SIZE is not None:
-    return _WORLD_SIZE
-
-  return runtime.world_size()
-
-
-def get_ordinal(defval=0):
-  """Retrieves the replication ordinal of the current thread.
-
-  The ordinals range from 0 to `xrt_world_size()` minus 1.
-
-  Args:
-    defval (int, optional): The default value to be returned in case there is no
-      replication information available. Ignored for runtime.
-      Default: 0
-
-  Returns:
-    The replication ordinal of the current thread.
-  """
-  global _ORDINAL
-  if _ORDINAL is not None:
-    return _ORDINAL
-
-  return runtime.global_ordinal()
-
-
-def get_local_ordinal(defval=0):
+def get_local_ordinal() -> int:
   """Retrieves the replication local ordinal of the current thread.
 
   The local ordinals range from 0 to the number of local devices minus 1.
-
-  Args:
-    defval (int, optional): The default value to be returned in case there is no
-      replication information available. Ignored for runtime.
-      Default: 0
 
   Returns:
     The replication local ordinal of the current thread.
@@ -169,7 +119,7 @@ def get_local_ordinal(defval=0):
   return runtime.local_ordinal()
 
 
-def is_master_ordinal(local=True):
+def is_master_ordinal(local: bool = True) -> bool:
   """Checks whether the current process is the master ordinal (0).
 
   Args:
@@ -181,16 +131,20 @@ def is_master_ordinal(local=True):
   Returns:
     A boolean indicating whether the current process is the master ordinal.
   """
-  ordinal = get_local_ordinal() if local else get_ordinal()
+  ordinal = get_local_ordinal() if local else runtime.global_ordinal()
   return ordinal == 0
 
 
-def master_print(*args, fd=sys.stdout, local=False, flush=False):
+def master_print(*args: Tuple[Any, ...],
+                 fd: TextIO = sys.stdout,
+                 local: bool = False,
+                 flush: bool = False):
   if is_master_ordinal(local=local):
     print(*args, file=fd, flush=flush)
 
 
-def xla_device(n=None, devkind=None):
+def xla_device(n: Optional[int] = None,
+               devkind: Optional[str] = None) -> torch.device:
   """Returns a given instance of an XLA device.
 
   Args:
@@ -213,7 +167,7 @@ def xla_device(n=None, devkind=None):
   return runtime.xla_device(n, devkind)
 
 
-def _xla_real_device(device):
+def _xla_real_device(device: torch.device) -> Any:
   device_str = str(device)
   m = re.match(r'xla:(\d+)$', device_str)
   if not m:
@@ -221,7 +175,7 @@ def _xla_real_device(device):
   return _DEVICES.value[int(m.group(1))]
 
 
-def xla_real_devices(devices: Optional[List[torch.device]] = None):
+def xla_real_devices(devices: Optional[List[torch.device]] = None) -> List[str]:
   """Returns the real devices' name.
 
   Args:
@@ -236,7 +190,7 @@ def xla_real_devices(devices: Optional[List[torch.device]] = None):
   return [_xla_real_device(device) for device in devices]
 
 
-def xla_device_hw(device):
+def xla_device_hw(device: Union[str, torch.device]) -> str:
   """Returns the hardware type of the given device.
 
   Args:
@@ -250,11 +204,12 @@ def xla_device_hw(device):
   return real_device.split(':')[0]
 
 
-def xla_replication_devices(local_devices):
+def xla_replication_devices(
+    local_devices: Optional[List[torch.device]] = None) -> List[str]:
   real_devices = xla_real_devices(local_devices)
   device_types = set()
   for device in real_devices:
-    xdev = parse_xla_device(device)
+    xdev = _utils.parse_xla_device(device)
     device_types.add(xdev[0])
   if len(device_types) != 1:
     # No replication if the device set spawns multiple device types.
@@ -271,29 +226,31 @@ def xla_replication_devices(local_devices):
   replication_devices = []
   for device in torch_xla._XLAC._xla_get_all_devices():
     # device is like 'CUDA:0'
-    xdev = parse_xla_device(device)
+    xdev = _utils.parse_xla_device(device)
     if not xdev:
       raise RuntimeError('Invalid device format: {}'.format(device))
     if xdev[0] == device_type:
       replication_devices.append(device)
   sorted_by_ordinal = sorted(
-      replication_devices, key=lambda device: parse_xla_device(device)[1])
+      replication_devices,
+      key=lambda device: _utils.parse_xla_device(device)[1])
   return sorted_by_ordinal
 
 
-def unlazy(tensors):
+def unlazy(tensors: List[torch.Tensor]):
   """Blocks the program until `tensors` are materialized.
 
   This API is for benchmarking, don't use it in real models.
 
   Args:
-    tensors (List[torch.Tensor]): List of `torch.Tensor`s to materialize. For
-      each Tensor `t` in the list, `t.device` must be an `xla` device.
+    tensors: List of `torch.Tensor`s to materialize. For each
+    Tensor `t` in the list, `t.device` must be an `xla` device.
   """
   torch_xla._XLAC._xla_sync_multi(tensors, devices=[], wait=True)
 
 
-def set_replication(device, devices):
+def set_replication(device: torch.device,
+                    devices: Optional[List[torch.device]]):
   device = str(device)
   devctx = _get_device_context(device=device)
   devices = [str(x) for x in devices]
@@ -311,7 +268,7 @@ def set_replication(device, devices):
 
 class RateTracker(object):
 
-  def __init__(self, smooth_factor=None):
+  def __init__(self, smooth_factor: Optional[float] = None):
     self._smooth_factor = xu.getenv_as(
         'RATE_TRACKER_SMOOTHING', float,
         0.4) if smooth_factor is None else smooth_factor
@@ -321,16 +278,16 @@ class RateTracker(object):
     self._partial_rate = None
     self._count = 0.0
 
-  def _update(self, now, rate):
+  def _update(self, now: float, rate: float):
     self._partial_count += self._count
     self._count = 0.0
     self._partial_time = now
     self._partial_rate = rate
 
-  def add(self, count):
+  def add(self, count: float):
     self._count += count
 
-  def _smooth(self, current_rate):
+  def _smooth(self, current_rate: float) -> float:
     if self._partial_rate is None:
       smoothed_rate = current_rate
     else:
@@ -355,12 +312,14 @@ class RateTracker(object):
 
 class ToXlaTensorArena(object):
 
-  def __init__(self, convert_fn, select_fn):
+  def __init__(self, convert_fn: Callable[[List[torch.Tensor]],
+                                          List[torch.Tensor]],
+               select_fn: Callable[[torch.Tensor], bool]):
     self._convert_fn = convert_fn
     self._select_fn = select_fn
     self._tensors = []
 
-  def _add(self, tensor):
+  def _add(self, tensor: torch.Tensor):
     self._tensors.append(tensor)
 
   def _convert(self):
@@ -370,28 +329,28 @@ class ToXlaTensorArena(object):
     else:
       self._converted_tensors = []
 
-  def _get_converted_tensor(self):
+  def _get_converted_tensor(self) -> torch.Tensor:
     assert self._index < len(self._converted_tensors)
     new_tensor = self._converted_tensors[self._index]
     self._index += 1
     return new_tensor
 
-  def _collect_tensors(self, inputs):
+  def _collect_tensors(self, inputs: Any):
 
-    def collect_fn(value):
+    def collect_fn(value: Any):
       self._add(value)
 
     xu.for_each_instance(inputs, lambda x: self._select_fn(x), collect_fn)
 
-  def _replace_tensors(self, inputs):
+  def _replace_tensors(self, inputs: Any):
 
-    def convert_fn(value):
+    def convert_fn(value: Any):
       return self._get_converted_tensor()
 
     return xu.for_each_instance_rewrite(inputs, lambda x: self._select_fn(x),
                                         convert_fn)
 
-  def transform(self, inputs):
+  def transform(self, inputs: Any):
     self._tensors = []
     self._collect_tensors(inputs)
     self._convert()
@@ -402,15 +361,15 @@ def check_view_sharing(obj):
   tensors = set()
   aliases = dict()
 
-  def tensor_info(t):
+  def tensor_info(t: torch.Tensor) -> str:
     return '{}{}'.format(t.dtype, list(t.size()))
 
-  def tensor_id(t):
+  def tensor_id(t: torch.Tensor) -> Tuple[int, str]:
     if is_xla_tensor(t):
       return torch_xla._XLAC._xla_get_tensor_id(t), 'xla'
     return id(t), 'torch'
 
-  def alias_id(t):
+  def alias_id(t: torch.Tensor) -> Tuple[int, str]:
     if is_xla_tensor(t):
       aid = torch_xla._XLAC._xla_get_tensor_view_alias_id(t)
       return None if aid == 0 else aid, 'xla'
@@ -432,7 +391,7 @@ def check_view_sharing(obj):
   xu.for_each_instance(obj, lambda x: type(x) == torch.Tensor, check_object)
 
 
-def _fetch_gradients(optimizer):
+def _fetch_gradients(optimizer: optim.Optimizer) -> List[torch.Tensor]:
   gradients = []
   for param_group in optimizer.__getstate__()['param_groups']:
     for group, params in param_group.items():
@@ -443,13 +402,18 @@ def _fetch_gradients(optimizer):
   return gradients
 
 
-def _get_all_reduce_token():
+def _get_all_reduce_token() -> Tuple[Any, DeviceContext]:
   devctx = _get_device_context()
   token = torch_xla._XLAC._get_all_reduce_token(devctx.device)
   return token, devctx
 
 
-def all_reduce(reduce_type, inputs, scale=1.0, groups=None, pin_layout=True):
+def all_reduce(
+    reduce_type: str,
+    inputs: Union[torch.Tensor, List[torch.Tensor]],
+    scale: float = 1.0,
+    groups: Optional[List[List[int]]] = None,
+    pin_layout: bool = True) -> Union[torch.Tensor, List[torch.Tensor]]:
   """Performs an inplace reduce operation on the input tensor(s).
 
   Args:
@@ -480,8 +444,8 @@ def all_reduce(reduce_type, inputs, scale=1.0, groups=None, pin_layout=True):
   groups = groups or []
 
   # No-op if there is only one device
-  if xrt_world_size() == 1 and not xu.getenv_as('XLA_ALWAYS_ALLREDUCE', bool,
-                                                False):
+  if runtime.world_size() == 1 and not xu.getenv_as('XLA_ALWAYS_ALLREDUCE',
+                                                    bool, False):
     if isinstance(inputs, torch.Tensor):
       return inputs.clone()
     else:
@@ -501,11 +465,14 @@ def all_reduce(reduce_type, inputs, scale=1.0, groups=None, pin_layout=True):
     torch_xla._XLAC._xla_all_reduce_inplace(reduce_type, inputs, scale, groups,
                                             pin_layout)
     results = inputs
-
   return results[0] if isinstance(inputs, torch.Tensor) else results
 
 
-def _all_gather_using_all_reduce(value, dim=0, groups=None, pin_layout=True):
+def _all_gather_using_all_reduce(
+    value: torch.Tensor,
+    dim: int = 0,
+    groups: Optional[List[List[int]]] = None,
+    pin_layout: bool = True) -> Optional[torch.Tensor]:
   """Performs an all-gather operation using all-reduce along a given dimension.
 
   Args:
@@ -517,7 +484,6 @@ def _all_gather_using_all_reduce(value, dim=0, groups=None, pin_layout=True):
         defines two groups, one with the `[0, 1, 2, 3]` replicas and one with
         the `[4, 5, 6, 7]` replicas. If `None` there will be only one group with
         all the replicas in it.
-    output (torch.Tensor): Optional output tensor.
     pin_layout (bool, optional): whether to pin the layout for this communication op.
       Layout pining can prevent potential data corruption when each process that
       participate in the communication has slightly different program, but it might
@@ -532,9 +498,9 @@ def _all_gather_using_all_reduce(value, dim=0, groups=None, pin_layout=True):
     dim = value.dim() + dim
   size = value.size(dim)
   padding = [0] * (2 * value.dim())
-  ordinal = get_ordinal()
+  ordinal = runtime.global_ordinal()
   if groups is None:
-    left, right = ordinal, xrt_world_size() - 1 - ordinal
+    left, right = ordinal, runtime.world_size() - 1 - ordinal
   else:
     ordinals = dict()
     for g in groups:
@@ -547,7 +513,11 @@ def _all_gather_using_all_reduce(value, dim=0, groups=None, pin_layout=True):
   return all_reduce(REDUCE_SUM, F.pad(value, padding), groups=groups)
 
 
-def all_gather(value, dim=0, groups=None, output=None, pin_layout=True):
+def all_gather(value: torch.Tensor,
+               dim: int = 0,
+               groups: Optional[List[List[int]]] = None,
+               output: Optional[torch.Tensor] = None,
+               pin_layout: bool = True) -> torch.Tensor:
   """Performs an all-gather operation along a given dimension.
 
   Args:
@@ -585,7 +555,7 @@ def all_gather(value, dim=0, groups=None, output=None, pin_layout=True):
       "Replica groups must have the same number of replicas/shards."
   else:
     # All replicas belong to a single group
-    shard_count = xrt_world_size()
+    shard_count = runtime.world_size()
 
   token, devctx = _get_all_reduce_token()
 
@@ -636,7 +606,16 @@ def all_gather(value, dim=0, groups=None, output=None, pin_layout=True):
 
 class CoalescingBuckets(object):
 
-  def __init__(self, func, input_list, output_list=None, bucket_cap_mb=160):
+  def __init__(
+      self,
+      func: Callable[[
+          Union[torch.Tensor,
+                List[torch.Tensor]], Optional[Union[torch.Tensor,
+                                                    List[torch.Tensor]]]
+      ], Union[torch.Tensor, List[torch.Tensor]]],
+      input_list: Any,
+      output_list: Optional[Any] = None,
+      bucket_cap_mb: int = 160):
     if not isinstance(input_list, list) or any(
         not isinstance(v, torch.Tensor) for v in input_list):
       raise TypeError(
@@ -673,13 +652,13 @@ class CoalescingBuckets(object):
     self._tensor_bucket = []
     self._output_bucket = [] if self._output_list else None
 
-  def add(self, tensor, idx):
+  def add(self, tensor: torch.Tensor, idx: int):
     self._total += tensor.numel() * tensor.element_size()
     self._tensor_bucket.append(tensor)
     if self._output_list != None:
       self._output_bucket.append(self._output_list[idx])
 
-  def __call__(self):
+  def __call__(self) -> Union[torch.Tensor, List[torch.Tensor]]:
     for idx, tensor in enumerate(self._input_list):
       tensor_bytes = tensor.numel() * tensor.element_size()
 
@@ -703,12 +682,13 @@ class CoalescingBuckets(object):
     return self._out_tensors
 
 
-def all_gather_bucketized(input_list,
-                          dim=0,
-                          groups=None,
-                          output=None,
-                          pin_layout=False,
-                          bucket_cap_mb=160):
+def all_gather_bucketized(
+    input_list: List[torch.Tensor],
+    dim: int = 0,
+    groups: Optional[List[List[int]]] = None,
+    output: Optional[torch.Tensor] = None,
+    pin_layout: bool = False,
+    bucket_cap_mb=160) -> Union[torch.Tensor, List[torch.Tensor]]:
   """Performs an all-gather operation along a given dimension, with bucketization.
 
   Args:
@@ -738,12 +718,12 @@ def all_gather_bucketized(input_list,
   return buckets()
 
 
-def all_to_all(value,
-               split_dimension,
-               concat_dimension,
-               split_count,
-               groups=None,
-               pin_layout=True):
+def all_to_all(value: torch.Tensor,
+               split_dimension: int,
+               concat_dimension: int,
+               split_count: int,
+               groups: Optional[List[List[int]]] = None,
+               pin_layout: bool = True) -> torch.Tensor:
   """Performs an XLA `AllToAll()` operation on the input tensor.
 
   See: https://www.tensorflow.org/xla/operation_semantics#alltoall
@@ -775,7 +755,8 @@ def all_to_all(value,
   return result[0]
 
 
-def collective_permute(value, pairs):
+def collective_permute(value: torch.Tensor,
+                       pairs: List[List[int]]) -> torch.Tensor:
   """Performs a XLA `CollectivePermute()` operation on the input tensor.
 
   WARNING: This function is not very reliable, may produce wrong results under
@@ -825,7 +806,8 @@ def collective_broadcast(tensors: List[torch.Tensor],
     # so each replica must have the same multiply op with the same parameters.
     for tensor in tensors:
       scale = torch.tensor(
-          1 if get_ordinal() == root_ordinal else 0, dtype=tensor.dtype)
+          1 if runtime.global_ordinal() == root_ordinal else 0,
+          dtype=tensor.dtype)
       # Transfer scale tensor as device data instead of constant 1 or 0.
       xscale = send_cpu_data_to_device(scale, tensor.device)
       tensor.mul_(xscale[0])
@@ -833,7 +815,7 @@ def collective_broadcast(tensors: List[torch.Tensor],
   all_reduce(REDUCE_SUM, tensors, groups=groups, pin_layout=pin_layout)
 
 
-def send(value, channel_id):
+def send(value: torch.Tensor, channel_id: int) -> torch.Tensor:
   """Performs a XLA `Send()` operation on the input tensor.
 
   See: https://www.tensorflow.org/xla/operation_semantics#send
@@ -850,7 +832,7 @@ def send(value, channel_id):
   return input_as_result
 
 
-def recv(output, channel_id):
+def recv(output: torch.Tensor, channel_id: int) -> torch.Tensor:
   """Performs a XLA `Recv()` operation on the input tensor.
 
   See: https://www.tensorflow.org/xla/operation_semantics#recv
@@ -865,14 +847,15 @@ def recv(output, channel_id):
   return result
 
 
-def reduce_scatter(reduce_type,
-                   input,
-                   scale,
-                   scatter_dim,
-                   shard_count,
-                   groups=None,
-                   output=None,
-                   pin_layout=True):
+def reduce_scatter(reduce_type: str,
+                   input: Union[torch.Tensor, List[torch.Tensor]],
+                   scale: float,
+                   scatter_dim: int,
+                   shard_count: int,
+                   groups: Optional[List[List[int]]] = None,
+                   output: Optional[Union[torch.Tensor,
+                                          List[torch.Tensor]]] = None,
+                   pin_layout: bool = True) -> torch.Tensor:
   """Performs a XLA `ReduceScatter()` operation on the input tensor.
 
   See: https://www.tensorflow.org/xla/operation_semantics#reducescatter
@@ -951,15 +934,17 @@ def reduce_scatter(reduce_type,
                     f"given {type(input)}.")
 
 
-def reduce_scatter_bucketized(reduce_type,
-                              input_list,
-                              scale,
-                              scatter_dim,
-                              shard_count,
-                              groups=None,
-                              output=None,
-                              pin_layout=False,
-                              bucket_cap_mb=160):
+def reduce_scatter_bucketized(reduce_type: str,
+                              input_list: Union[torch.Tensor,
+                                                List[torch.Tensor]],
+                              scale: float,
+                              scatter_dim: int,
+                              shard_count: int,
+                              groups: Optional[List[List[int]]] = None,
+                              output: Optional[Union[
+                                  torch.Tensor, List[torch.Tensor]]] = None,
+                              pin_layout: bool = False,
+                              bucket_cap_mb: int = 160) -> CoalescingBuckets:
   """Performs a XLA `ReduceScatter()` operation on a list of tensors (bucketized).
 
   See: https://www.tensorflow.org/xla/operation_semantics#reducescatter
@@ -976,7 +961,10 @@ def reduce_scatter_bucketized(reduce_type,
     the same as the input.
   """
 
-  def _reduce_scatter_coalesced(_input_list, _output_list=None):
+  def _reduce_scatter_coalesced(
+      _input_list: Union[torch.Tensor, List[torch.Tensor]],
+      _output_list: Optional[Union[torch.Tensor, List[torch.Tensor]]] = None
+  ) -> Union[torch.Tensor, List[torch.Tensor]]:
     return reduce_scatter(
         reduce_type=reduce_type,
         input=_input_list,
@@ -995,7 +983,9 @@ def reduce_scatter_bucketized(reduce_type,
   return buckets()
 
 
-def add_step_closure(closure, args=(), run_async=False):
+def add_step_closure(closure: Callable[..., Any],
+                     args: Tuple[Any] = (),
+                     run_async: bool = False):
   """Adds a closure to the list of the ones to be run at the end of the step.
 
   Many times during model training there is the need to print/report (print to
@@ -1027,7 +1017,7 @@ def add_step_closure(closure, args=(), run_async=False):
   step_closures.append(lambda a=args: closure(*a))
 
 
-def _run_step_closures():
+def _run_step_closures() -> DeviceContext:
   devctx = _get_device_context()
   async_step_closures = getattr(devctx, 'async_step_closures', None)
   if async_step_closures is not None:
@@ -1046,7 +1036,7 @@ def _run_step_closures():
   return devctx
 
 
-def mark_step(wait=False, reset_scope=True):
+def mark_step(wait: bool = False, reset_scope: bool = True):
   if xu.getenv_as('XLA_EMIT_STEPLOG', bool, False):
     print(
         'torch_xla.core.xla_model::mark_step\n',
@@ -1065,13 +1055,13 @@ def mark_step(wait=False, reset_scope=True):
   torch_xla._XLAC._set_all_reduce_token(devctx.device, None)
 
 
-def get_stablehlo(tensors=None) -> str:
+# TODO(lsy323): When `tensors` is empty, the some intermediate tensors will also be
+# dump as outputs. Need further investigation.
+def get_stablehlo(tensors: Optional[List[torch.Tensor]] = None) -> str:
   """Get StableHLO for the computation graph in string format.
 
   If `tensors` is not empty, the graph with `tensors` as outputs will be dump.
   If `tensors` is empty, the whole computation graph will be dump.
-  TODO(lsy323): When `tensors` is empty, the some intermediate tensors will also be
-  dump as outputs. Need further investigation.
 
   For inference graph, it is recommended to pass the model outputs to `tensors`.
   For training graph, it is not straightforward to identify the "outputs". Using empty `tensors` is recommended.
@@ -1091,13 +1081,13 @@ def get_stablehlo(tensors=None) -> str:
       False).decode('utf-8')
 
 
-def get_stablehlo_bytecode(tensors=None) -> bytes:
+# TODO(lsy323): When `tensors` is empty, the some intermediate tensors will also be
+# dump as outputs. Need further investigation.
+def get_stablehlo_bytecode(tensors: Optional[torch.Tensor] = None) -> bytes:
   """Get StableHLO for the computation graph in bytecode format.
 
   If `tensors` is not empty, the graph with `tensors` as outputs will be dump.
   If `tensors` is empty, the whole computation graph will be dump.
-  TODO(lsy323): When `tensors` is empty, the some intermediate tensors will also be
-  dump as outputs. Need further investigation.
 
   For inference graph, it is recommended to pass the model outputs to `tensors`.
   For training graph, it is not straightforward to identify the "outputs". Using empty `tensors` is recommended.
@@ -1114,7 +1104,7 @@ def get_stablehlo_bytecode(tensors=None) -> bytes:
       tensors, torch_xla._XLAC._xla_get_default_device(), [], True)
 
 
-def wait_device_ops(devices=[]):
+def wait_device_ops(devices: List[str] = []):
   """Waits for all the async operations on the given devices to complete.
 
   Args:
@@ -1124,11 +1114,11 @@ def wait_device_ops(devices=[]):
   torch_xla._XLAC._xla_wait_device_ops(devices=devices)
 
 
-def all_reduce_bucketized_gradients(gradients,
-                                    scale,
-                                    groups,
-                                    pin_layout,
-                                    bucket_cap_mb=0):
+def all_reduce_bucketized_gradients(gradients: List[torch.Tensor],
+                                    scale: float,
+                                    groups: Optional[List[List[int]]],
+                                    pin_layout: bool,
+                                    bucket_cap_mb: int = 0):
   total = 0
   tensor_bucket = []
   bucket_cap = bucket_cap_mb * 1024 * 1024
@@ -1159,7 +1149,9 @@ def all_reduce_bucketized_gradients(gradients,
         pin_layout=pin_layout)
 
 
-def reduce_gradients(optimizer, groups=None, pin_layout=True):
+def reduce_gradients(optimizer: optim.Optimizer,
+                     groups: Optional[List[List[int]]] = None,
+                     pin_layout: bool = True):
   """Reduces all the gradients handled by an optimizer.
 
   Args:
@@ -1173,7 +1165,7 @@ def reduce_gradients(optimizer, groups=None, pin_layout=True):
     pin_layout (bool, optional): whether to pin the layout when reducing gradients.
       See `xm.all_reduce` for details.
   """
-  count = xrt_world_size()
+  count = runtime.world_size()
   if count > 1:
     gradients = _fetch_gradients(optimizer)
     bucket_cap_mb = int(os.getenv('ALLREDUCE_GRADIENTS_BUCKET_SIZE_MB', 0))
@@ -1197,12 +1189,12 @@ def reduce_gradients(optimizer, groups=None, pin_layout=True):
           pin_layout=pin_layout)
 
 
-def optimizer_step(optimizer,
-                   barrier=False,
-                   optimizer_args={},
-                   groups=None,
-                   pin_layout=True):
-  """Run the provided optimizer step and issue the XLA device step computation.
+def optimizer_step(optimizer: optim.Optimizer,
+                   barrier: bool = False,
+                   optimizer_args: Dict = {},
+                   groups: Optional[List[List[int]]] = None,
+                   pin_layout: bool = True):
+  """Run the provided optimizer step and sync gradidents across all devices.
 
   Args:
     optimizer (:class:`torch.Optimizer`): The `torch.Optimizer` instance whose
@@ -1225,6 +1217,11 @@ def optimizer_step(optimizer,
 
   Returns:
     The same value returned by the `optimizer.step()` call.
+
+  Example:
+
+    >>> import torch_xla.core.xla_model as xm
+    >>> xm.optimizer_step(self.optimizer)
   """
   reduce_gradients(optimizer, groups=groups, pin_layout=pin_layout)
   loss = optimizer.step(**optimizer_args)
@@ -1233,7 +1230,10 @@ def optimizer_step(optimizer,
   return loss
 
 
-def save(data, file_or_path, master_only=True, global_master=False):
+def save(data: Any,
+         file_or_path: Union[str, TextIO],
+         master_only: bool = True,
+         global_master: bool = False):
   """Saves the input data into a file.
 
   The saved data is transferred to PyTorch CPU device before being saved, so a
@@ -1258,9 +1258,13 @@ def save(data, file_or_path, master_only=True, global_master=False):
       controls whether every host's master (if ``global_master`` is ``False``)
       saves the content, or only the global master (ordinal 0).
       Default: False
-    sync (bool, optional): Whether to synchronize all replicas after saving
-      tensors. If True, all replicas must call `xm.save` or the main process
-      will hang.
+
+  Example:
+
+    >>> import torch_xla.core.xla_model as xm
+    >>> xm.wait_device_ops() # wait for all pending operations to finish.
+    >>> xm.save(obj_to_save, path_to_save)
+    >>> xm.rendezvous('torch_xla.core.xla_model.save') # multi process context only
   """
   should_write_data = not master_only or is_master_ordinal(
       local=not global_master)
@@ -1270,7 +1274,7 @@ def save(data, file_or_path, master_only=True, global_master=False):
     torch.save(cpu_data, file_or_path)
 
 
-def _maybe_convert_to_cpu(data, convert=True):
+def _maybe_convert_to_cpu(data: Any, convert: bool = True) -> ToXlaTensorArena:
 
   def convert_fn(tensors):
     torch_xla._XLAC._xla_sync_multi(
@@ -1285,13 +1289,32 @@ def _maybe_convert_to_cpu(data, convert=True):
   return ToXlaTensorArena(convert_fn, select_fn).transform(data)
 
 
-def send_cpu_data_to_device(datas, device, input_sharding=None):
+def send_cpu_data_to_device(
+    datas: Any,
+    device: Union[str, torch.device],
+    input_sharding: Optional[ShardingSpec] = None) -> ToXlaTensorArena:
 
   def convert_fn(tensors):
     devices = [str(device)] * len(tensors)
     shardings = None
     if input_sharding:
       shardings = [input_sharding.xla_spec(t) for t in tensors]
+    if input_sharding and input_sharding.minibatch:
+      # when minibatch is configured we must make sure batch dimension of
+      # the tensor is divisible by the local runtime device count.
+      for tensor, sharding in zip(tensors, shardings):
+        # assume batch dimension is 0
+        local_runtime_device_count = torch_xla.runtime.addressable_runtime_device_count(
+        )
+        if sharding and tensor.dim() > 0 and (tensor.size()[0] %
+                                              local_runtime_device_count) != 0:
+          raise RuntimeError(
+              "When minibatch is configured, batch dimension of the tensor " +
+              "must be divisible by local runtime device count.input data shape "
+              +
+              f"={tensor.size()}, local_runtime_device_count = {local_runtime_device_count}"
+          )
+
     xtensors = torch_xla._XLAC._xla_tensors_from_aten(tensors, devices,
                                                       shardings)
     return xtensors
@@ -1360,7 +1383,9 @@ def xla_rendezvous(payload: bytes = b'',
   return [bytes(p.cpu().tolist()) for p in payloads]
 
 
-def rendezvous(tag, payload=b'', replicas=[]):
+def rendezvous(tag: str,
+               payload: bytes = b'',
+               replicas: List[int] = []) -> List[bytes]:
   """Waits for all the mesh clients to reach the named rendezvous.
 
   Note: PJRT does not support the XRT mesh server, so this is effectively an
@@ -1376,11 +1401,20 @@ def rendezvous(tag, payload=b'', replicas=[]):
   Returns:
     The payloads exchanged by all the other cores, with the payload of core
     ordinal `i` at position `i` in the returned tuple.
+
+  Example:
+
+    >>> import torch_xla.core.xla_model as xm
+    >>> xm.rendezvous('example')
   """
   return xla_rendezvous(payload, replicas or None, tag=tag)
 
 
-def do_on_ordinals(target, data=(), ordinals=(0,)):
+def do_on_ordinals(
+    target: Callable[..., Any],
+    data: Union[Tuple, Any] = (),
+    ordinals: Union[List[int], Set[int], int] = (0,)
+) -> Optional[Any]:
   """Runs a function only on a given set of ordinals.
 
   Args:
@@ -1398,7 +1432,7 @@ def do_on_ordinals(target, data=(), ordinals=(0,)):
     In the ordinals that ran the `target` function, the function return value,
     otherwise `None`.
   """
-  running = get_ordinal() in ordinals
+  running = runtime.global_ordinal() in ordinals
   cpu_data = _maybe_convert_to_cpu(data, convert=running)
   if running:
     result = target(*cpu_data)
@@ -1408,7 +1442,8 @@ def do_on_ordinals(target, data=(), ordinals=(0,)):
   return result
 
 
-def mesh_reduce(tag, data, reduce_fn):
+def mesh_reduce(tag: str, data,
+                reduce_fn: Callable[..., Any]) -> Union[Any, ToXlaTensorArena]:
   """Performs an out-of-graph client mesh reduction.
 
   Args:
@@ -1421,6 +1456,12 @@ def mesh_reduce(tag, data, reduce_fn):
 
   Returns:
     The reduced value.
+
+  Example:
+
+    >>> import torch_xla.core.xla_model as xm
+    >>> import numpy as np
+    >>> accuracy = xm.mesh_reduce('test_accuracy', accuracy, np.mean)
   """
   cpu_data = _maybe_convert_to_cpu(data)
   bio = io.BytesIO()
@@ -1433,7 +1474,7 @@ def mesh_reduce(tag, data, reduce_fn):
   return reduce_fn(xldata) if xldata else cpu_data
 
 
-def set_rng_state(seed, device=None):
+def set_rng_state(seed: int, device: Optional[str] = None):
   """Sets the random number generator state.
 
   Args:
@@ -1446,7 +1487,7 @@ def set_rng_state(seed, device=None):
   torch_xla._XLAC._xla_set_rng_seed(seed, str(device) if device else '')
 
 
-def get_rng_state(device=None):
+def get_rng_state(device: Optional[str] = None) -> int:
   """Gets the current running random number generator state.
 
   Args:
@@ -1462,7 +1503,7 @@ def get_rng_state(device=None):
 
 
 @contextlib.contextmanager
-def fork_rng(device=None, enabled=True):
+def fork_rng(device: Optional[str] = None, enabled: bool = True):
   """
   Forks the RNG, so that when you return, the RNG is reset to the state that it was previously in.
   Args:
@@ -1497,13 +1538,18 @@ def get_memory_info(device: Optional[torch.device] = None) -> MemoryInfo:
 
   Returns:
     MemoryInfo dict with memory usage for the given device.
+
+  Example:
+
+    >>> xm.get_memory_info()
+    {'bytes_used': 290816, 'bytes_limit': 34088157184, 'peak_bytes_used': 500816}
   """
   if device == None:
     device = xla_device()
   return torch_xla._XLAC._xla_memory_info(str(device))
 
 
-def optimization_barrier_(tensors):
+def optimization_barrier_(tensors: List[torch.Tensor]):
   """Blocks xla compiler from moving computations across this barrier. The common
   use case would be blocking xla common-subexpression elimination pass from undoing
   the gradient checkpointing.

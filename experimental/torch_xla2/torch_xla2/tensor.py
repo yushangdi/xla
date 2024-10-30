@@ -1,6 +1,6 @@
 import sys
 import contextlib
-from typing import Optional
+from typing import Optional, Any
 import jax
 import jax.numpy as jnp
 import numpy
@@ -83,6 +83,8 @@ class XLATensor2(torch.Tensor):
   def __str__(self):
     return "XLATensor2({} {})".format(str(type(self._elem)), str(self._elem))
 
+  __repr__ = __str__
+
   def __jax_array__(self):
     return self._elem
 
@@ -104,8 +106,8 @@ class XLATensor2(torch.Tensor):
     # return torch.reshape(self, new_shape)
 
   def __setitem__(self, key, val):
-    key = unwrap(key)
-    self._elem = self._elem.at[key].set(val._elem)
+    key, val = self._env.t2j_iso((key, val))
+    self._elem = self._elem.at[key].set(val)
 
   def type_as(self, other):
     self._elem = self._elem.astype(other._elem.dtype)
@@ -145,26 +147,19 @@ class XLATensor2(torch.Tensor):
   def dim(self):
     return self.ndim
 
+  @property
+  def device(self):
+    return torch.device('jax:0')
 
+  @property
+  def jax_device(self):
+    return self._elem.device
 
-# TODO: slice of slice should also be another slice
-class SliceView(XLATensor2):
+  def tolist(self):
+    return self._elem.tolist()
+  
 
-  def __init__(self, orig_tensor, slice):
-    self._orig_tensor = orig_tensor
-    self._slice = slice
-
-  def numpy(self):
-    return self._orig_tensor.numpy()[self._slice]
-
-  def jax(self):
-    return self._orig_tensor.jax()[self._slice]
-
-  def torch(self):
-    return self._orig_tensor.torch()[self.slice]
-
-  def mutate(self, slice, new_content):
-    self._orig_tensor._elem = self._orig_tensor.at[slice].set(new_content)
+ 
 
 
 
@@ -172,13 +167,16 @@ def debug_accuracy(func, args, kwargs, current_output):
   args_torch, kwargs_torch, out_torch = torch_pytree.tree_map_only(
       torch.Tensor, lambda x: j2t(x._elem), (args, kwargs, current_output))
 
-  expected_out = func(*args_torch, **kwargs_torch)
+  with mode_utils.no_dispatch(), torch._C.DisableTorchFunction():
+    if 'device' in kwargs_torch:
+      kwargs_torch['device'] = 'cpu'  # do the torch native for comparison
+    expected_out = func(*args_torch, **kwargs_torch)
 
   flattened_current_out, _ = torch_pytree.tree_flatten(out_torch)
   flattened_expected_out, _ = torch_pytree.tree_flatten(expected_out)
 
   for ex, real in zip(flattened_expected_out, flattened_current_out):
-    if ex.dtype != real.dtype:
+    if isinstance(ex, torch.Tensor) and ex.dtype != real.dtype:
       ex = ex.to(real.dtype)
     try:
       if (isinstance(ex, torch.Tensor) and
@@ -210,6 +208,10 @@ class XLAFunctionMode(torch.overrides.TorchFunctionMode):
         return self.env.dispatch(func, types, args, kwargs)
       except OperatorNotFound:
         pass
+      if _name_of_func(func) in ('rot90'): # skip rot90 with k%4==0 due to no change
+        if len(args) >= 2 and type(args[1]) == int:
+          if ((args[1])%4 == 0):
+            return args[0]
       return func(*args, **(kwargs or {}))
 
 
@@ -223,7 +225,7 @@ class XLADispatchMode(torch_dispatch.TorchDispatchMode):
       if isinstance(func, torch._ops.OpOverloadPacket):
         with self:
           return func(*args, **kwargs)
-      if func.namespace not in ('aten', '_c10d_functional'):
+      if func.namespace not in ('aten', '_c10d_functional', 'torchvision'):
         return func(*args, **kwargs)
       return self.env.dispatch(func, types, args, kwargs)
 
@@ -231,6 +233,21 @@ def _name_of_func(func):
   if hasattr(func, 'name'):
     return func.name()
   return func.__name__
+
+
+# Constructors that don't take other tensor as input
+TENSOR_CONSTRUCTORS = {
+  torch.ones,
+  torch.zeros,
+  torch.empty,
+  torch.empty_strided,
+  torch.tensor,
+  torch.arange,
+  torch.eye,
+  torch.randn,
+  torch.rand,
+  torch.randint,
+}
 
 
 class Environment(contextlib.ContextDecorator):
@@ -260,8 +277,27 @@ class Environment(contextlib.ContextDecorator):
         self._mesh = None
         self.config = configuration or config.Configuration()
 
+        self._jax_devices = set(['jax', 'jax_cpu', 'xla'])
+
+    def get_as_jax_device(self, device: Any):
+      if device is None:
+        return jax.devices()[0]
+
+      if isinstance(device, torch.device):
+        device = str(device)
+      if self.config.use_torch_native_for_cpu_tensor and device.startswith('cpu'):
+        return None
+
+      if not self.config.treat_cuda_as_jax_device and device.startswith('cuda'):
+        return None
+      
+      if device in ('jax_cpu', 'cpu'):
+        return jax.devices('cpu')[0]
+      return jax.devices()[0]
+
+
     def load_ops(self):
-      from torch_xla2.ops import jaten, jtorch, jc10d, ops_registry
+      from torch_xla2.ops import jaten, jtorch, jc10d, jtorchvision_nms, ops_registry
       self._ops.update(ops_registry.all_aten_ops)
       self._ops.update(ops_registry.all_torch_functions)
 
@@ -278,19 +314,87 @@ class Environment(contextlib.ContextDecorator):
             needs_env=False
           )
 
+    def _to_copy(self, the_tensor, new_dtype, new_device):
+      if isinstance(the_tensor, XLATensor2):
+        arr = the_tensor.jax()
+        if new_dtype is not None and new_dtype != arr.dtype:
+          arr = arr.astype(mappings.t2j_dtype(new_dtype))
+        if new_device is not None:
+          jax_device = self.get_as_jax_device(new_device)
+          if jax_device:
+            arr = jax.device_put(arr, jax_device)
+          else:
+            # converting to a non-jax device: let torch native handle it
+            torch_tensor = j2t(arr) if isinstance(the_tensor, XLATensor2) else arr
+            with mode_utils.no_dispatch(), torch._C.DisableTorchFunction():
+              return torch_tensor.to(new_device)
+      else:
+        if new_dtype is not None and new_dtype != the_tensor.dtype:
+          with mode_utils.no_dispatch(), torch._C.DisableTorchFunction():
+            the_tensor = the_tensor.to(new_dtype)
+        jax_device = self.get_as_jax_device(new_device)
+        if jax_device:
+          arr = t2j(the_tensor)
+          arr = jax.device_put(arr, jax_device)
+        else:
+          with mode_utils.no_dispatch(), torch._C.DisableTorchFunction():
+            return torch_tensor.to(new_device)
+
+      return XLATensor2(arr, self)
+      
+
     def get_and_rotate_prng_key(self, generator: Optional[torch.Generator]=None):
       # Always use the default `randint` to get the next seed
-      with mode_utils.no_dispatch():
+      with mode_utils.no_dispatch(), torch._C.DisableTorchFunction():
         next_key = torch.randint(
             0, 2**32, (), dtype=torch.uint32, generator=generator).numpy()
 
       return jax.random.key(next_key)
 
+    def _handle_tensor_constructor(self, func, args, kwargs):
+      device = kwargs.get('device')
+      jax_device = self.get_as_jax_device(device)
+      if jax_device is None:
+        # let torch handle it
+        with mode_utils.no_dispatch(), torch._C.DisableTorchFunction():
+          return func(*args, **kwargs)
+      
+      with jax.default_device(jax_device):
+        op = self._ops.get(func)
+        res = op.func(*args, **kwargs)
+        if isinstance(res, jax.Array):
+          res = XLATensor2(res, self)
+        return res
+
+    def _torch_Tensor_to(self, args, kwargs):
+      the_tensor = args[0]
+      args = args[1:]
+      if len(args) >= 1 and isinstance(args[0], torch.Tensor):
+        dtype = args[0].dtype
+        device = args[0].device
+        return self._to_copy(the_tensor, dtype, device)
+      device = kwargs.get('device')
+      dtype = kwargs.get('dtype')
+      # args like pin_memory etc that we will ignore
+      args = list(filter(lambda x: not isinstance(x, bool), args))
+      if len(args) >= 2:
+        device, dtype, *_ = args
+      elif len(args) == 1 and isinstance(args[0], torch.dtype):
+        dtype = args[0]
+      elif len(args) == 1:
+        device = args[0]
+      return self._to_copy(the_tensor, dtype, device)
+
+
     def dispatch(self, func, types, args, kwargs):
 
       kwargs = kwargs or {}
+      if func in TENSOR_CONSTRUCTORS:
+        return self._handle_tensor_constructor(func, args, kwargs)
+      if func in (torch.Tensor.to, torch.ops.aten._to_copy, torch.ops.aten._to_copy.default):
+        return self._torch_Tensor_to(args, kwargs)
 
-      # If the func don't act on XLATensor2, and is not a tensor constructor,
+      # If the func doesn't act on XLATensor2, and is not a tensor constructor,
       # We should skip and let torch handle it.
       tensor_args = [t for t in args if isinstance(t, torch.Tensor)]
       if tensor_args and all(not isinstance(t, XLATensor2) for t in tensor_args):
@@ -320,6 +424,8 @@ class Environment(contextlib.ContextDecorator):
         except AssertionError:
           if self.config.debug_mixed_tensor:
             import pdb; pdb.set_trace()
+          else:
+            raise
 
 
         if op.needs_env:
@@ -346,12 +452,8 @@ class Environment(contextlib.ContextDecorator):
 
     def _move_one_value(self, val):
       if isinstance(val, torch.nn.Module):
-        state_dict = self.to_xla(val.state_dict())
-        val.load_state_dict(state_dict, assign=True)
-        # Non-persistent buffers are not in state_dict
-        for b_name, buffer in val.named_buffers():
-          setattr(val, b_name, self.to_xla(buffer))
-        return val
+        with self:
+          return val.to('jax')
       if isinstance(val, XLATensor2):
         return val
       if isinstance(val, torch.Tensor):

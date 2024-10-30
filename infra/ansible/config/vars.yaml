@@ -7,7 +7,7 @@ cuda_compute_capabilities: 7.0,7.5,8.0,9.0
 llvm_debian_repo: bullseye
 clang_version: 17
 # PyTorch and PyTorch/XLA wheel versions.
-package_version: 2.5.0
+package_version: 2.6.0
 # If set to true, wheels will be renamed to $WHEEL_NAME-nightly-cp38-cp38-linux_x86_64.whl.
 nightly_release: false
 # Whether to preinstall libtpu in the PyTorch/XLA wheel. Ignored for GPU build.
@@ -18,3 +18,5 @@ cache_suffix: ""
 build_cpp_tests: 0
 # Whether to tag wheels with git hash, e.g. X.Y.Z+git123abc
 git_versioned_xla_build: false
+# Whether to use C++11 ABI when building torch and torch_xla.
+cxx11_abi: 0

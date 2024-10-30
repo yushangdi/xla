@@ -3,7 +3,6 @@ from torch_xla import runtime as xr
 from torch_xla._internal import pjrt
 
 
-@xr.requires_pjrt
 def spawn(fn,
           args=(),
           nprocs=None,
@@ -20,7 +19,9 @@ def spawn(fn,
     args (tuple): The arguments for `fn`.
       Default: Empty tuple
     nprocs (int): The number of processes/devices for the replication. At the
-      moment, if specified, can be either 1 or the maximum number of devices.
+      moment, if specified, can be either 1 or None (which would automatically
+      converted to the maximum number of devices). Other numbers would result
+      in ValueError.
     join (bool): Whether the call should block waiting for the completion of the
       processes which have being spawned.
       Default: True
@@ -55,7 +56,7 @@ class MpModelWrapper(object):
       model = WRAPPED_MODEL.to(device)
       ...
 
-    xmp.spawn(_mp_fn, ..., start_method='fork')
+    torch_xla.launch(_mp_fn, ..., start_method='fork')
 
   This method has two advantages. First it uses only one copy of the memory
   pages to host the original model weights, and second it serializes the move
@@ -102,7 +103,7 @@ class MpSerialExecutor(object):
       dataset = SERIAL_EXEC.run(lambda: load_dataset('/tmp/mnist-data'))
       ...
 
-    xmp.spawn(_mp_fn, ...)
+    torch_xla.launch(_mp_fn, ...)
   """
 
   def __init__(self):

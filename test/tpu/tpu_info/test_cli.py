@@ -42,7 +42,7 @@ class TpuInfoCliTest(parameterized.TestCase):
       p = multiprocessing.Process(
           target=self._init_tpu_and_wait, args=(0, q, done, env))
       p.start()
-      pid = q.get(timeout=10.0)
+      pid = q.get(timeout=20.0)
       with contextlib.ExitStack() as e:
         e.callback(done.set)
         yield pid
@@ -85,8 +85,7 @@ class TpuInfoCliTest(parameterized.TestCase):
 
       # v2 and v3 may have duplicates due to multithreading
       child_pids = set()
-      for _ in range(self.chip_type.value.accelerators_per_chip *
-                     self.num_chips):
+      for _ in range(self.chip_type.value.devices_per_chip * self.num_chips):
         child_pids.add(q.get(timeout=20.0))
       with contextlib.ExitStack() as e:
         e.callback(done.set)

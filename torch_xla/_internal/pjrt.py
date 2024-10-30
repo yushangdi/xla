@@ -41,7 +41,6 @@ def _merge_replica_results(
   return dict(replica_results)
 
 
-@runtime.requires_pjrt
 def _run_thread_per_device(
     local_rank: int, local_world_size: int, fn: Callable[[], R],
     initializer_fn: Callable[[int, int], None]) -> Dict[int, R]:
@@ -66,7 +65,7 @@ def _run_thread_per_device(
     torch_xla._XLAC._xla_set_default_device(device)
 
     # See Note Note [Dynamo WORLD_SIEZ and ORDINAL].
-    xm._init_world_size_ordinal()
+    runtime._init_world_size_ordinal()
 
     return fn()
 
@@ -81,7 +80,6 @@ def _run_thread_per_device(
   return _merge_replica_results(replica_results)
 
 
-@runtime.requires_pjrt
 def _run_singleprocess(fn: Callable[..., R], *args, **kwargs) -> Dict[int, R]:
   """Runs `fn` on a single device core.
 
@@ -99,7 +97,6 @@ def _run_singleprocess(fn: Callable[..., R], *args, **kwargs) -> Dict[int, R]:
   return fn(*args, **kwargs)
 
 
-@runtime.requires_pjrt
 def initialize_singleprocess():
   os.environ.setdefault(xenv.PJRT_LOCAL_PROCESS_COUNT, '1')
 
@@ -110,7 +107,6 @@ def initialize_singleprocess():
   xm.set_replication(xm.xla_device(), [])
 
 
-@runtime.requires_pjrt
 def initialize_multiprocess(local_rank: int, local_world_size: int):
   os.environ.setdefault(xenv.PJRT_LOCAL_PROCESS_RANK, str(local_rank))
   os.environ.setdefault(xenv.PJRT_LOCAL_PROCESS_COUNT, str(local_world_size))
@@ -120,13 +116,12 @@ def initialize_multiprocess(local_rank: int, local_world_size: int):
   elif runtime.device_type() == 'TPU':
     tpu.configure_topology(local_rank, local_world_size)
   elif runtime.device_type() == 'NEURON':
-    neuron.initialize_env(local_rank)
+    neuron.initialize_env(local_rank, local_world_size)
 
   devices = xm.get_xla_supported_devices()
   xm.set_replication(xm.xla_device(), devices)
 
 
-@runtime.requires_pjrt
 def run_multiprocess(fn: Callable[..., R],
                      *args,
                      start_method: str = 'spawn',
@@ -199,7 +194,9 @@ def spawn(fn: Callable,
   Args:
     fn: Callable that takes the process index as the first argument.
     nprocs (int): The number of processes/devices for the replication. At the
-      moment, if specified, can be either 1 or the maximum number of devices.
+      moment, if specified, can be either 1 or None (which would automatically
+      converted to the maximum number of devices). Other numbers would result
+      in ValueError.
     args: args to pass to `fn`
     start_method: The Python `multiprocessing` process creation method.
       Default: `spawn`
@@ -209,12 +206,13 @@ def spawn(fn: Callable,
   if nprocs == 1:
     return _run_singleprocess(spawn_fn)
   elif nprocs is not None:
-    logging.warning('Unsupported nprocs (%d), ignoring...' % nprocs)
+    raise ValueError(
+        'Unsupported nprocs (%d). Please use the environment variable for the hardware you are using (X_NUM_DEVICES where X is CPU, GPU, TPU, NEURONCORE, etc).'
+        % nprocs)
 
   run_multiprocess(spawn_fn, start_method=start_method)
 
 
-@runtime.requires_pjrt
 def _initialize_single_process(local_rank: int, local_world_size: int):
   os.environ.setdefault(xenv.PJRT_LOCAL_PROCESS_RANK, str(local_rank))
   os.environ.setdefault(xenv.PJRT_LOCAL_PROCESS_COUNT, str(local_world_size))

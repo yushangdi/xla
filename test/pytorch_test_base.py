@@ -299,6 +299,7 @@ DISABLED_TORCH_TESTS_ANY = {
         # torch.autograd.gradcheck.GradcheckError: Jacobian mismatch for output 0 with respect to input 0
         'test_GRU_grad_and_gradgrad_xla_float64',  # grad check failure
         'test_LSTM_grad_and_gradgrad_xla_float64',  # grad check failure
+        'test_upsamplingNearest3d_correctness_memory_format0_isize_10_osize_15_xla',  # check fail in tsl env.cc
     },
 
     # test/nn/test_dropout.py
@@ -632,8 +633,7 @@ class XLATestBase(DeviceTypeTestBase):
   def setUpClass(cls):
     # Sets the primary test device to the xla_device (CPU or TPU)
     cls.primary_device = str(xm.xla_device())
-    torch_xla._XLAC._xla_set_use_full_mat_mul_precision(
-        use_full_mat_mul_precision=True)
+    torch_xla._XLAC._xla_set_mat_mul_precision('highest')
 
   def setUp(self):
     super().setUp()

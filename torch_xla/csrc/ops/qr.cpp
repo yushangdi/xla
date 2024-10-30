@@ -5,7 +5,7 @@
 #include "torch_xla/csrc/lowering_context.h"
 #include "xla/client/lib/constants.h"
 #include "xla/client/lib/matrix.h"
-#include "xla/client/lib/qr.h"
+#include "xla/hlo/builder/lib/qr.h"
 
 namespace torch_xla {
 namespace {
@@ -47,7 +47,7 @@ QR::QR(const torch::lazy::Value& input, bool some)
       some_(some) {}
 
 torch::lazy::NodePtr QR::Clone(torch::lazy::OpList operands) const {
-  return torch::lazy::MakeNode<QR>(operands.at(0), some_);
+  return torch_xla::MakeNode<QR>(operands.at(0), some_);
 }
 
 XlaOpVector QR::Lower(LoweringContext* loctx) const {

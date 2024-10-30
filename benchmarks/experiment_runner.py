@@ -12,7 +12,9 @@ import time
 import torch
 import torch._dynamo.utils as dynamo_utils
 import tiers
-from typing import Optional, Any, List, Dict, Sequence
+import traceback
+import typing
+from typing import Any, Dict, List, Optional, Sequence
 import torch_xla.debug.metrics as met
 from tqdm import tqdm
 from enum import Enum
@@ -21,13 +23,14 @@ from torch.profiler import profile, ProfilerActivity
 import copy
 from torch.autograd import DeviceType
 from benchmark_model import ModelLoader
-from verifier import VerificationCode, VerificationResult, verify
+from verifier import VerificationCode, VerificationException, verify
 from enum import Enum
 from torchbench_model import TorchBenchModelLoader
 from benchmark_model import BenchmarkModel
 from benchmark_experiment import ExperimentLoader, BenchmarkExperiment
-from util import move_to_device, randomize_input, us_to_s, ns_to_s, StrOrBool
+from util import cleanup, move_to_device, randomize_input, reset_rng_state, us_to_s, ns_to_s, StrOrBool
 
+import torch_xla
 import torch_xla.core.xla_model as xm
 import torch_xla.debug.profiler as xp
 
@@ -52,15 +55,6 @@ class ExperimentRunner:
     self.output_dir = os.path.abspath(self._args.output_dirname)
     os.makedirs(self.output_dir, exist_ok=True)
     self.output_file = os.path.join(self.output_dir, self._args.output_basename)
-
-  def reset_rng_state(self, benchmark_experiment: BenchmarkExperiment):
-    torch.manual_seed(1337)
-    random.seed(1337)
-    np.random.seed(1337)
-    # TODO(piz): setup the rng state on jax for torch_xla2.
-    if benchmark_experiment.xla is not None and benchmark_experiment.torch_xla2 is None:
-      device = benchmark_experiment.get_device()
-      xm.set_rng_state(1337, str(device))
 
   def run(self):
     is_main_process = self._args.experiment_config is None and \
@@ -137,20 +131,18 @@ class ExperimentRunner:
         if (not self._args.no_skip and not self.model_loader.is_compatible(
             benchmark_model, benchmark_experiment)):
           logger.warning("SKIP incompatible model and experiment configs.")
-          self._save_results(benchmark_experiment.to_dict(),
-                             benchmark_model.to_dict(), {"error": "SKIP"})
+          self._save_results(
+              benchmark_experiment.to_dict(),
+              benchmark_model.to_dict(),
+              metrics={"error": "SKIP"},
+              verification_code=VerificationCode.VERIFIER_SKIPPED,
+          )
           continue
 
         # Compose child process environment.
         process_env = os.environ.copy()
         benchmark_experiment.update_process_env(process_env)
-        try:
-          benchmark_model.update_process_env(process_env)
-        except ValueError as e:
-          logger.error(f"ERROR preparing child env: {e}")
-          self._save_results(benchmark_experiment.to_dict(),
-                             benchmark_model.to_dict(), {"error": str(e)})
-          continue
+        benchmark_model.update_process_env(process_env)
 
         # Setup HLO dumps.
         if self._args.dump_hlo:
@@ -163,6 +155,12 @@ class ExperimentRunner:
           else:
             xla_flags = f"{xla_flags} {new_xla_flags}"
           process_env["XLA_FLAGS"] = xla_flags
+
+        if self._args.save_ir_format:
+          path = self._get_results_file_path(experiment_cfg, model_cfg, "dump",
+                                             self._args.save_ir_format)
+          process_env["XLA_SAVE_TENSORS_FMT"] = self._args.save_ir_format
+          process_env["XLA_SAVE_TENSORS_FILE"] = str(path)
 
         # Launch subprocess.
         try:
@@ -188,26 +186,42 @@ class ExperimentRunner:
         except subprocess.TimeoutExpired as e:
           self._fwd_captured_stdout_stderr(e.stdout, e.stderr)
           logger.error("TIMEOUT")
-          self._save_results(benchmark_experiment.to_dict(),
-                             benchmark_model.to_dict(), {"error": str(e)})
+          self._save_results(
+              benchmark_experiment.to_dict(),
+              benchmark_model.to_dict(),
+              metrics={"error": str(e)},
+              verification_code=VerificationCode.VERIFIER_DIDNT_RUN,
+          )
         except subprocess.CalledProcessError as e:
           self._fwd_captured_stdout_stderr(e.stdout, e.stderr)
           logger.error("ERROR in subprocess")
-          self._save_results(benchmark_experiment.to_dict(),
-                             benchmark_model.to_dict(), {"error": e.stderr})
+          self._save_results(
+              benchmark_experiment.to_dict(),
+              benchmark_model.to_dict(),
+              metrics={"error": e.stderr},
+              verification_code=VerificationCode.VERIFIER_DIDNT_RUN,
+          )
         except subprocess.SubprocessError as e:
           logger.error("ERROR when launching child process")
-          self._save_results(benchmark_experiment.to_dict(),
-                             benchmark_model.to_dict(), {"error": str(e)})
+          self._save_results(
+              benchmark_experiment.to_dict(),
+              benchmark_model.to_dict(),
+              metrics={"error": str(e)},
+              verification_code=VerificationCode.VERIFIER_DIDNT_RUN,
+          )
         except ValueError as e:
           logger.error(f"ERROR {e}")
-          self._save_results(benchmark_experiment.to_dict(),
-                             benchmark_model.to_dict(), {"error": str(e)})
+          self._save_results(
+              benchmark_experiment.to_dict(),
+              benchmark_model.to_dict(),
+              metrics={"error": str(e)},
+              verification_code=VerificationCode.VERIFIER_DIDNT_RUN,
+          )
 
   # TODO: Use `_unique_basename` instead.
   def _get_config_fingerprint(
-      self, experiment_config: OrderedDict[str, Optional[StrOrBool]],
-      model_config: OrderedDict[str, Optional[StrOrBool]]) -> str:
+      self, experiment_config: typing.OrderedDict[str, Optional[StrOrBool]],
+      model_config: typing.OrderedDict[str, Optional[StrOrBool]]) -> str:
     # Experiment `batch_size` may be altered by model in `set_up`, so we will
     # ignore that.
     return "-".join(
@@ -255,52 +269,75 @@ class ExperimentRunner:
 
     # Load experiment and model.
     experiment_config = json.loads(self._args.experiment_config)
+    experiment = self.experiment_loader.load_experiment(experiment_config)
+    experiment_dict = experiment.to_dict()
+
     model_config = json.loads(self._args.model_config)
-    benchmark_experiment = self.experiment_loader.load_experiment(
-        experiment_config)
-    self.reset_rng_state(benchmark_experiment)
-    benchmark_model = self.model_loader.load_model(model_config,
-                                                   benchmark_experiment)
+    model = self.model_loader.load_model(model_config, experiment, dummy=True)
+    model_dict = model.to_dict()
 
-    # Repeat the experiment and accumulate metrics.
-    last_output = None
-    with benchmark_model.pick_grad():
-      accumulated_metrics = OrderedDict()
-      for repeat_iteration in range(self._args.repeat):
-        metrics, last_output = self.run_once_and_gather_metrics(
-            benchmark_experiment, benchmark_model, experiment_config,
-            model_config, repeat_iteration)
-        for k, v in metrics.items():
-          if k not in accumulated_metrics:
-            accumulated_metrics[k] = []
-          accumulated_metrics[k].append(v)
+    # Initialize output variables
+    accumulated_metrics = OrderedDict()
+    verification_code = VerificationCode.VERIFIER_SKIPPED
 
-    verify_res = verify(
-        last_output,
-        experiment_config,
-        model_config,
-        self.experiment_loader,
-        self.model_loader,
-        mean_rel_error_tolerance=0.02,  # allow max 2% difference w.r.t eager runtime
-        noop=not self._args.verify)
-    self._save_results(benchmark_experiment.to_dict(),
-                       benchmark_model.to_dict(), accumulated_metrics,
-                       verify_res)
+    # Turn on CUDAGraphs if we are running inductor
+    if experiment.is_inductor():
+      from torch._inductor import config as inductor_config
+      inductor_config.triton.cudagraphs = True
+
+    # Only run the actual experiment first if the --verify flag is not
+    # specified. This is so we avoid using too much memory before running
+    # eager.
+    if not self._args.verify:
+      reset_rng_state(experiment)
+      model = self.model_loader.load_model(model_config, experiment)
+
+      # real batch_size can be updated after load_model, need to update
+      # so the config can be reflected in the report.
+      experiment_dict['batch_size'] = experiment.batch_size
+
+      # Repeat the experiment and accumulate metrics.
+      with model.pick_grad():
+        for repeat_iteration in range(self._args.repeat):
+          metrics, _ = self.run_once_and_gather_metrics(experiment, model,
+                                                        experiment_config,
+                                                        model_config,
+                                                        repeat_iteration)
+          for k, v in metrics.items():
+            if k not in accumulated_metrics:
+              accumulated_metrics[k] = []
+            accumulated_metrics[k].append(v)
+    elif not model.skip_verifier():
+      try:
+        verification_code = verify(
+            self,
+            experiment_config,
+            model_config,
+            tolerance=model.tolerance(),
+            use_cosine_similarity=model.use_cosine_similarity())
+      except VerificationException as e:
+        verification_code = e.code
+        # Record the error in the metrics dictionary.
+        # Similar to what's done when the whole experiment fails.
+        accumulated_metrics["error"] = traceback.format_exc()
+
+    self._save_results(experiment_dict, model_dict, accumulated_metrics,
+                       verification_code)
 
   def run_once_and_gather_metrics(
       self, benchmark_experiment: BenchmarkExperiment,
       benchmark_model: BenchmarkModel,
-      experiment_config: OrderedDict[str, Optional[StrOrBool]],
-      model_config: OrderedDict[str,
-                                Optional[StrOrBool]], repeat_iteration: int):
+      experiment_config: typing.OrderedDict[str, Optional[StrOrBool]],
+      model_config: typing.OrderedDict[str, Optional[StrOrBool]],
+      repeat_iteration: int):
 
     # Prepare inputs.
-    self.reset_rng_state(benchmark_experiment)
+    reset_rng_state(benchmark_experiment)
     inputs_list = self._prepare_inputs(benchmark_model.example_inputs,
                                        self._args.randomize_input)
 
     # Reset state and sync.
-    self.reset_rng_state(benchmark_experiment)
+    reset_rng_state(benchmark_experiment)
     if benchmark_experiment.torch_xla2:
       self._mark_step(benchmark_experiment, inputs_list)
     else:
@@ -463,8 +500,8 @@ class ExperimentRunner:
   ##############################################################################
 
   def _unique_basename(
-      self, experiment_config: OrderedDict[str, Optional[StrOrBool]],
-      model_config: OrderedDict[str, Optional[StrOrBool]]) -> str:
+      self, experiment_config: typing.OrderedDict[str, Optional[StrOrBool]],
+      model_config: typing.OrderedDict[str, Optional[StrOrBool]]) -> str:
 
     def unique_basename_segment(x, max_len=32):
       s = str(x).replace(" ", "")
@@ -483,14 +520,13 @@ class ExperimentRunner:
     ]
     return "-".join(segments)
 
-  def _get_results_file_path(self,
-                             experiment_config: OrderedDict[
-                                 str, Optional[StrOrBool]],
-                             model_config: OrderedDict[str,
-                                                       Optional[StrOrBool]],
-                             partial_name: str,
-                             ext: Optional[str] = "txt",
-                             sub_dirname: Optional[str] = None) -> str:
+  def _get_results_file_path(
+      self,
+      experiment_config: typing.OrderedDict[str, Optional[StrOrBool]],
+      model_config: typing.OrderedDict[str, Optional[StrOrBool]],
+      partial_name: str,
+      ext: Optional[str] = "txt",
+      sub_dirname: Optional[str] = None) -> str:
     is_dir = ext is None
     model_name = model_config["model_name"]
     basename = self._unique_basename(experiment_config, model_config)
@@ -507,12 +543,12 @@ class ExperimentRunner:
 
     return path
 
-  def _get_results_dir_path(self,
-                            experiment_config: OrderedDict[str,
-                                                           Optional[StrOrBool]],
-                            model_config: OrderedDict[str, Optional[StrOrBool]],
-                            partial_name: str,
-                            sub_dirname: Optional[str] = None) -> str:
+  def _get_results_dir_path(
+      self,
+      experiment_config: typing.OrderedDict[str, Optional[StrOrBool]],
+      model_config: typing.OrderedDict[str, Optional[StrOrBool]],
+      partial_name: str,
+      sub_dirname: Optional[str] = None) -> str:
     return self._get_results_file_path(
         experiment_config,
         model_config,
@@ -520,15 +556,15 @@ class ExperimentRunner:
         ext=None,
         sub_dirname=sub_dirname)
 
-  def _save_results_file(self,
-                         text: str,
-                         experiment_config: OrderedDict[str,
-                                                        Optional[StrOrBool]],
-                         model_config: OrderedDict[str, Optional[StrOrBool]],
-                         partial_name: str,
-                         ext: str = "txt",
-                         sub_dirname: Optional[str] = None,
-                         mode: str = "w"):
+  def _save_results_file(
+      self,
+      text: str,
+      experiment_config: typing.OrderedDict[str, Optional[StrOrBool]],
+      model_config: typing.OrderedDict[str, Optional[StrOrBool]],
+      partial_name: str,
+      ext: str = "txt",
+      sub_dirname: Optional[str] = None,
+      mode: str = "w"):
     path = self._get_results_file_path(experiment_config, model_config,
                                        partial_name, ext, sub_dirname)
     with open(path, mode, encoding="utf-8") as f:
@@ -536,11 +572,11 @@ class ExperimentRunner:
 
   def _save_results(
       self,
-      experiment_config: OrderedDict[str, Optional[StrOrBool]],
-      model_config: OrderedDict[str, Optional[StrOrBool]],
-      metrics: OrderedDict[str, Any],
-      verification_result: Optional[VerificationResult] = VerificationResult(
-          VerificationCode.CANNOT_PROCEED_WITH_VERIFICATION)):
+      experiment_config: typing.OrderedDict[str, Optional[StrOrBool]],
+      model_config: typing.OrderedDict[str, Optional[StrOrBool]],
+      metrics: typing.OrderedDict[str, Any],
+      verification_code: VerificationCode,
+  ):
     results = OrderedDict()
     results["model"] = model_config
     results["experiment"] = experiment_config
@@ -548,8 +584,7 @@ class ExperimentRunner:
     results["iterations_per_run"] = self._args.iterations_per_run
     results["metrics"] = metrics
     results["timestamp"] = self._args.timestamp
-    results["verification_code"] = verification_result.result_code
-    results["verification_mean_rel_error"] = verification_result.mean_rel_error
+    results["verification_code"] = verification_code
     with open(self.output_file, mode="a", encoding="utf-8") as f:
       json.dump(results, f, ensure_ascii=False)
       f.write("\n")
@@ -558,11 +593,11 @@ class ExperimentRunner:
   # Helpers to dump and analyze the PyTorch profile, PyTorch/XLA metrics, etc. #
   ##############################################################################
 
-  def _dump_pytorch_profile(self, profile: Optional[torch.profiler.profile],
-                            experiment_config: OrderedDict[str,
-                                                           Optional[StrOrBool]],
-                            model_config: OrderedDict[str, Optional[StrOrBool]],
-                            repeat_iteration: int):
+  def _dump_pytorch_profile(
+      self, profile: Optional[torch.profiler.profile],
+      experiment_config: typing.OrderedDict[str, Optional[StrOrBool]],
+      model_config: typing.OrderedDict[str, Optional[StrOrBool]],
+      repeat_iteration: int):
     assert profile is not None, "Expect PyTorch profile"
 
     # Dump PyTorch trace.
@@ -602,11 +637,11 @@ class ExperimentRunner:
       if evt.device_type == DeviceType.CPU:
         # In legacy profiler, kernel info is stored in cpu events
         if evt.is_legacy:
-          total_cuda_time += evt.self_cuda_time_total
+          total_cuda_time += evt.self_device_time_total
       elif evt.device_type == DeviceType.CUDA:
         # In kineto profiler, there're events with the correct device type
         # (e.g. CUDA)
-        total_cuda_time += evt.self_cuda_time_total
+        total_cuda_time += evt.self_device_time_total
 
     metrics["total_cpu_time_s"] = us_to_s(total_cpu_time)
     metrics["total_cuda_time_s"] = us_to_s(total_cuda_time)
@@ -624,19 +659,16 @@ class ExperimentRunner:
     def is_aten_op(op_name):
       return 'aten::' in op_name
 
-    def get_xla_cpu_fallback_ops(met):
-      return set(name for name in met.counter_names() if is_aten_op(name))
-
     extract_prof_info = lambda event: {
         "self_cpu_time_s": us_to_s(event.self_cpu_time_total),
-        "self_cuda_time_s": us_to_s(event.self_cuda_time_total),
+        "self_cuda_time_s": us_to_s(event.self_device_time_total),
         "total_cpu_time_s": us_to_s(event.cpu_time_total),
-        "total_cuda_time_s": us_to_s(event.cuda_time_total),
+        "total_cuda_time_s": us_to_s(event.device_time_total),
         "num_of_calls": event.count
     }
 
     if benchmark_experiment.xla:
-      unlowered_ops = get_xla_cpu_fallback_ops(met)
+      unlowered_ops = met.executed_fallback_ops()
       if not unlowered_ops:
         return
       if "xla_unlowered_ops" not in metrics:
@@ -653,11 +685,10 @@ class ExperimentRunner:
           metrics["inductor_ops"] = dict()
         metrics["inductor_ops"][op_name] = extract_prof_info(event)
 
-  def _dump_dynamo_counters(self,
-                            experiment_config: OrderedDict[str,
-                                                           Optional[StrOrBool]],
-                            model_config: OrderedDict[str, Optional[StrOrBool]],
-                            repeat_iteration: int):
+  def _dump_dynamo_counters(
+      self, experiment_config: typing.OrderedDict[str, Optional[StrOrBool]],
+      model_config: typing.OrderedDict[str, Optional[StrOrBool]],
+      repeat_iteration: int):
     text = f"{json.dumps(dynamo_utils.counters)}\n"
     self._save_results_file(
         text,
@@ -667,9 +698,9 @@ class ExperimentRunner:
         sub_dirname=str(repeat_iteration))
 
   def _dump_pytorch_xla_metrics(
-      self, experiment_config: OrderedDict[str, Optional[StrOrBool]],
-      model_config: OrderedDict[str,
-                                Optional[StrOrBool]], repeat_iteration: int):
+      self, experiment_config: typing.OrderedDict[str, Optional[StrOrBool]],
+      model_config: typing.OrderedDict[str, Optional[StrOrBool]],
+      repeat_iteration: int):
     text = met.metrics_report()
     assert isinstance(text, str)
     self._save_results_file(
@@ -758,7 +789,7 @@ def parse_args(args=None):
   )
   parser.add_argument(
       "--dynamo",
-      choices=["None", "inductor", "openxla_eval", "openxla"],
+      choices=["None", "inductor", "openxla"],
       action="append",
       help="Specify an xla option to use.",
   )
@@ -800,6 +831,11 @@ def parse_args(args=None):
       default=0,
       help="""ID of the benchmark suite partition to be run. Used to divide CI
         tasks""",
+  )
+  parser.add_argument(
+      "--enable-functionalization",
+      action="store_true",
+      help="Enable the functionalization layer by default",
   )
   parser.add_argument(
       "--dry-run",
@@ -923,6 +959,11 @@ def parse_args(args=None):
       help="Whether to enable fast F32 multiplication in PyTorch.",
   )
   parser.add_argument(
+      "--matmul-precision",
+      choices=["default", "high", "highest"],
+      help="Set matrix multiplication for both PyTorch and PyTorch/XLA.",
+  )
+  parser.add_argument(
       "--experiment-config",
       type=str,
       help="""JSON string defining the experiment configuration. When set an
@@ -955,6 +996,12 @@ def parse_args(args=None):
       help="""If set, verifies the model output with PT Eager mode, and saves relative error to the output file."""
   )
   parser.add_argument(
+      "--verify-iterations",
+      type=int,
+      default=1,
+      help="Number of iterations to be run in the verification process.",
+  )
+  parser.add_argument(
       "--no-skip",
       action="store_true",
       help="Do not skip any model.",
@@ -962,7 +1009,6 @@ def parse_args(args=None):
   parser.add_argument(
       "--profile-xla",
       action="store_true",
-      default=False,
       help="Dumps the XLA profiler traces to the output directory via XPlane. It later can be opened by Tensorboard."
   )
   parser.add_argument(
@@ -970,6 +1016,11 @@ def parse_args(args=None):
       default=5 * 1000,
       type=int,
       help="Defines the duration of the profiling when `profile-xla` flag is set.",
+  )
+  parser.add_argument(
+      "--save-ir-format",
+      choices=["text", "hlo", "stablehlo"],
+      help="Save intermediate IR.",
   )
   return parser.parse_args(args)
 
@@ -986,9 +1037,15 @@ def main():
   logging.basicConfig(level=args.log_level.value, force=True)
   logger.debug(f"Parsed args: {args}")
 
+  precision = 'highest'
+  if args.matmul_precision is not None:
+    precision = args.matmul_precision
+  # --disable-tf32 flag may overwrite precision settings for BC reasons.
   if not args.disable_tf32:
     logger.warning('Enabling fast F32 multiplication for PyTorch')
-    torch.set_float32_matmul_precision('high')
+    precision = 'high'
+  torch.set_float32_matmul_precision(precision)
+  torch_xla._XLAC._xla_set_mat_mul_precision(precision)
 
   if args.profile_xla:
     logger.info(

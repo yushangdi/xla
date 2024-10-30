@@ -50,7 +50,7 @@ new_local_repository(
 #    curl -L https://github.com/openxla/xla/archive/<git hash>.tar.gz | sha256sum
 #    and update the sha256 with the result.
 
-xla_hash = 'db472b8c3d83bc27b3c67067802b9a37ef7542e3'
+xla_hash = 'f8eded9d390de4c72b82f1e2bfaca9b8d737761c'
 
 http_archive(
     name = "xla",
@@ -60,15 +60,15 @@ http_archive(
     ],
     patch_tool = "patch",
     patches = [
-        "//openxla_patches:cache_urls.diff",
         "//openxla_patches:gpu_race_condition.diff",
-        "//openxla_patches:f16_abi_clang.diff",
     ],
     strip_prefix = "xla-" + xla_hash,
     urls = [
         "https://github.com/openxla/xla/archive/" + xla_hash + ".tar.gz",
     ],
 )
+
+
 
 # For development, one often wants to make changes to the OpenXLA repository as well
 # as the PyTorch/XLA repository. You can override the pinned repository above with a
@@ -114,6 +114,7 @@ load("@pypi//:requirements.bzl", "install_deps")
 install_deps()
 
 
+
 # Initialize OpenXLA's external dependencies.
 load("@xla//:workspace4.bzl", "xla_workspace4")
 
@@ -135,3 +136,7 @@ load("@xla//:workspace0.bzl", "xla_workspace0")
 
 xla_workspace0()
 
+load("@tsl//third_party/gpus:cuda_configure.bzl", "cuda_configure")
+cuda_configure(name = "local_config_cuda")
+load("@tsl//third_party/nccl:nccl_configure.bzl", "nccl_configure")
+nccl_configure(name = "local_config_nccl")
